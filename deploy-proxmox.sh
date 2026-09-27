@@ -78,14 +78,20 @@ if [ "$MODE" = new ]; then
   pveum user add overseer@pve --comment "Lab Overseer" 2>/dev/null || true
   pveum aclmod / -user overseer@pve -role OverseerRole
   TN="ov$(date +%y%m%d%H%M%S)"
+  # If setup is cancelled or fails before the new container is using this token, remove it again
+  # (only this run's token — existing tokens are never touched).
+  TOKEN_PENDING=1
+  cleanup(){ [ "${TOKEN_PENDING:-0}" = 1 ] && pveum user token remove overseer@pve "$TN" >/dev/null 2>&1 \
+             && echo "Removed unused API token $TN."; rm -rf "${TMPC:-/nonexistent}"; }
+  trap cleanup EXIT
   PVE_TOKEN=$(pveum user token add overseer@pve "$TN" --privsep 0 --output-format json | python3 -c 'import sys,json;print(json.load(sys.stdin)["value"])')
   HOSTIP=$(ip -4 -o addr show "$DEFDEV" 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1); HOSTIP=${HOSTIP:-$(hostname -I | awk '{print $1}')}
   export PVE_URL="https://$HOSTIP:8006" PVE_NODE="$(hostname)" PVE_TOKEN_ID="overseer@pve!$TN" PVE_TOKEN
   export OVERSEER_LLM=$([ "$LLM" = claude ] && echo claude || ([ "$LLM" = remote ] && echo remote || echo ollama))
 
   say "Setup wizard"
-  TMPC=$(mktemp -d); trap 'rm -rf "$TMPC"' EXIT
-  python3 "$SRC/setup.py" --hypervisor proxmox --out-dir "$TMPC" || { echo "Setup cancelled — nothing was created except the API token ($TN)."; exit 1; }
+  TMPC=$(mktemp -d)
+  python3 "$SRC/setup.py" --hypervisor proxmox --out-dir "$TMPC" || { echo "Setup cancelled — nothing was created."; exit 1; }
 
   say "Debian 12 template"
   pveam update >/dev/null
@@ -110,6 +116,7 @@ pct exec "$CTID" -- tar -xzf /tmp/overseer-src.tgz -C /opt/overseer
 if [ "$MODE" = new ]; then
   pct push "$CTID" "$TMPC/config.yaml" /etc/overseer/config.yaml
   pct push "$CTID" "$TMPC/secrets.env" /etc/overseer/secrets.env --perms 600
+  TOKEN_PENDING=0          # the container now owns this token — keep it from here on
 fi
 
 say "Installing inside CT $CTID (this is the slow part — AI models are a few GB)"
