@@ -1,0 +1,76 @@
+# Lab Overseer config. The setup wizard (python3 setup.py) writes this for you;
+# edit by hand any time, then: systemctl restart overseer
+
+lab_description: "a homelab"   # one line, fed to the LLM, e.g. "a Proxmox homelab on a Dell R730 with a pfSense VM router"
+dry_run: true                  # WATCH mode: approved fixes are only simulated. Toggle live with /auto and /watch
+interval_seconds: 60
+review_interval_minutes: 60    # full LLM review even when everything is green
+max_actions_per_hour: 2        # per target; more than this = flapping, escalates to tier 3
+db_path: /var/lib/overseer/overseer.db
+decision_log: /var/lib/overseer/decisions.jsonl
+heartbeat_url: ""              # optional dead-man switch, e.g. a healthchecks.io ping URL
+
+llm:
+  backend: ollama              # ollama | claude
+  ollama:
+    url: http://127.0.0.1:11434
+    model: qwen2.5:7b-instruct   # incident triage (structured JSON)
+    brief_model: llama3.2:3b     # /status analyst (fast, terse)
+    timeout: 300
+  claude:
+    api_key_env: ANTHROPIC_API_KEY
+    triage_model: claude-haiku-4-5-20251001
+    escalate_model: claude-sonnet-5
+    escalate_at_tier: 2
+
+notifier:
+  type: telegram               # telegram | discord
+  # telegram:
+  token_env: TG_TOKEN
+  chat_id: ""                  # wizard fills this; bot ignores every other chat
+  # discord (uncomment and set type: discord):
+  # token_env: DISCORD_TOKEN
+  # guild_id: ""               # your server ID
+  # channel_id: ""             # channel for alerts
+  # owner_id: ""               # your user ID; only you can use commands/buttons
+
+hypervisor:
+  type: none                   # proxmox | esxi | none
+  # proxmox:
+  # url: https://192.168.1.10:8006
+  # node: pve
+  # token_id: overseer@pve!overseer
+  # token_secret_env: PVE_TOKEN
+  # verify_ssl: false
+  # esxi (host or vCenter):
+  # host: 192.168.1.20
+  # user: overseer@vsphere.local
+  # password_env: ESXI_PASSWORD
+  # verify_ssl: false
+
+switch: {}                     # optional SNMP v2c, e.g.:
+#  host: 192.168.1.2
+#  community: yourReadOnlyString
+#  watch_ports:
+#    Gi1/0/1: {role: "uplink", expect_speed: 1000}
+#  ignore_ports: []
+
+# Every thing the overseer can touch. floor_tier = minimum severity; actions = the ONLY things allowed.
+# Proxmox targets use vmid + kind (vm|ct). ESXi targets use vmname + kind: vm.
+targets:
+  host:     {kind: host, floor_tier: 3, actions: [], notes: "the hypervisor itself"}
+  internet: {kind: external, actions: []}
+  # router: {kind: vm, vmid: 100, floor_tier: 3, actions: [start_vm], notes: "router/firewall; everything depends on it"}
+  # pihole:
+  #   kind: vm
+  #   vmid: 120
+  #   actions: [restart_service:pihole-FTL, start_vm, reboot_vm]
+  #   ssh: {host: 192.168.1.53, user: overseer}
+
+checks:
+  - {name: gateway,   type: ping, host: 192.168.1.1, target: router}
+  - {name: wan-1111,  type: ping, host: 1.1.1.1,     target: internet}
+  - {name: wan-9999,  type: ping, host: 9.9.9.9,     target: internet}
+  # - {name: pihole-dns, type: dns,  server: 192.168.1.53, query: cloudflare.com, target: pihole}
+  # - {name: web,        type: http, url: http://192.168.1.80, target: web}
+  # - {name: ldap,       type: tcp,  host: 192.168.1.30, port: 389, target: dc01}

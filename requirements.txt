@@ -1,0 +1,6 @@
+requests>=2.31
+pyyaml>=6
+dnspython>=2.6
+anthropic>=0.40
+discord.py>=2.3
+pyvmomi>=8.0

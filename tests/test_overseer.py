@@ -1,0 +1,366 @@
+import json, time, yaml, pathlib
+from overseer import policy, brain
+from overseer.notifiers import telegram
+from overseer.main import Engine
+
+CFG = yaml.safe_load(open(pathlib.Path(__file__).parent.parent / "config.example.yaml"))
+# test inventory (the shipped example is intentionally near-empty)
+CFG["targets"] = {
+    "pfsense": {"kind": "vm", "vmid": 100, "floor_tier": 3, "actions": ["start_vm"]},
+    "pihole": {"kind": "vm", "vmid": 120, "actions": ["restart_service:pihole-FTL", "start_vm", "reboot_vm"],
+               "ssh": {"host": "10.0.0.53", "user": "overseer"}},
+}
+T = CFG["targets"]
+
+
+def P(**kw):
+    base = dict(target="pihole", checks=["pihole-dns"], summary="x", tier=2, security=False, action="restart_service",
+                action_arg="pihole-FTL", reasoning="")
+    base.update(kw)
+    return base
+
+
+# ---- policy: the LLM can't talk its way past the floors ----
+def test_every_fix_needs_approval():
+    for tier in (1, 2, 3):
+        d = policy.decide(P(tier=tier), T, 0)
+        assert (d.mode, d.action) == ("approve", "restart_service")
+
+def test_pfsense_floor_forces_approval():
+    d = policy.decide(P(target="pfsense", tier=1, action="start_vm", action_arg=""), T, 0)
+    assert (d.tier, d.mode) == (3, "approve")
+
+def test_non_whitelisted_action_stripped():
+    d = policy.decide(P(target="pfsense", tier=3, action="reboot_vm", action_arg=""), T, 0)
+    assert d.action == "none" and d.mode == "notify"
+
+def test_arbitrary_service_rejected():
+    d = policy.decide(P(action_arg="ssh"), T, 0)
+    assert d.action == "none"
+
+def test_security_never_acts():
+    d = policy.decide(P(tier=1, security=True), T, 0)
+    assert (d.tier, d.mode, d.action) == (4, "notify_only", "none")
+
+def test_llm_tier4_never_acts():
+    assert policy.decide(P(tier=4), T, 0).action == "none"
+
+def test_unknown_target():
+    d = policy.decide(P(target="nuclear_reactor"), T, 0)
+    assert d.action == "none"
+
+def test_flapping_escalates():
+    d = policy.decide(P(), T, recent_actions=2)
+    assert (d.tier, d.mode) == (3, "approve")
+
+def test_tier_clamped():
+    assert policy.decide(P(tier=-5, action="none"), T, 0).tier == 0
+    assert policy.decide(P(tier=99), T, 0).tier == 4
+
+
+# ---- engine end-to-end with fake brain + no network ----
+class FakeBackend:
+    def __init__(self, out): self.out = out
+    def name(self): return "fake"
+    def triage(self, prompt, escalate=False): return self.out
+
+
+def make_engine(tmp_path, monkeypatch, proposals, failing):
+    cfg = dict(CFG, notifier={'type': 'telegram', 'chat_id': '42'}, hypervisor={'type': 'none'}, db_path=str(tmp_path / "o.db"), decision_log=str(tmp_path / "d.jsonl"),
+               switch=None, checks=[], grace_minutes=0)
+    eng = Engine(cfg)
+    eng.backend = FakeBackend({"incidents": proposals})
+    sent = []
+    eng.wa.send = lambda t, **k: sent.append(t)
+    snap = {"ts": 1, "took_s": 0, "facts": {}, "checks": [{"name": n, "target": "x", "ok": False, "detail": "down"} for n in failing]}
+    monkeypatch.setattr("overseer.main.snapshot", lambda *a: snap)
+    return eng, sent, snap
+
+
+def test_tier2_waits_for_go(tmp_path, monkeypatch):
+    eng, sent, _ = make_engine(tmp_path, monkeypatch, [P()], ["pihole-dns"])
+    eng.tick(); eng.tick()
+    inc = eng.state._q("SELECT * FROM incidents")[0]
+    assert inc["status"] == "pending_approval"            # never auto-runs, even with grace=0
+    eng.on_command("GO", inc["id"], "")
+    assert eng.state.get(inc["id"])["status"] == "executed"
+    assert any("WATCH mode" in s for s in sent)
+
+def test_stop_cancels(tmp_path, monkeypatch):
+    eng, sent, _ = make_engine(tmp_path, monkeypatch, [P()], ["pihole-dns"])
+    eng.grace = 999
+    eng.tick()
+    iid = eng.state._q("SELECT id FROM incidents")[0]["id"]
+    eng.on_command("STOP", iid, "")
+    assert eng.state.get(iid)["status"] == "cancelled"
+
+def test_pfsense_waits_for_go(tmp_path, monkeypatch):
+    eng, sent, _ = make_engine(tmp_path, monkeypatch, [P(target="pfsense", checks=["pfsense-gw-v20"], action="start_vm", action_arg="")], ["pfsense-gw-v20"])
+    eng.tick(); eng.tick()
+    iid = eng.state._q("SELECT id FROM incidents")[0]["id"]
+    assert eng.state.get(iid)["status"] == "pending_approval"
+    eng.on_command("GO", iid, "")
+    assert eng.state.get(iid)["status"] == "executed"
+
+def test_dedupe_and_recovery(tmp_path, monkeypatch):
+    eng, sent, snap = make_engine(tmp_path, monkeypatch, [P(action="none")], ["pihole-dns"])
+    eng.tick(); eng.last_failing = set(); eng.tick()
+    assert len(eng.state._q("SELECT * FROM incidents")) == 1
+    snap["checks"] = []
+    eng.tick()
+    assert any("recovered" in s for s in sent)
+
+def test_llm_crash_falls_back(tmp_path, monkeypatch):
+    eng, sent, _ = make_engine(tmp_path, monkeypatch, [], ["pihole-dns"])
+    def boom(*a, **k): raise TimeoutError("ollama slow")
+    eng.backend.triage = boom
+    eng.tick()
+    assert any("T1" in s for s in sent)
+    rec = json.loads(open(tmp_path / "d.jsonl").readline())
+    assert rec["error"]
+
+def test_telegram_owner_only(tmp_path, monkeypatch):
+    eng, sent, _ = make_engine(tmp_path, monkeypatch, [], [])
+    got = []
+    eng.wa._call = lambda *a, **k: {"ok": True}
+    h = lambda *a: got.append(a)
+    eng.wa._handle_update({"message": {"chat": {"id": 999}, "text": "/go A11"}}, h)
+    eng.wa._handle_update({"message": {"chat": {"id": 42}, "text": "/stop a11"}}, h)
+    eng.wa._handle_update({"callback_query": {"id": "x", "data": "GO B22", "message": {"chat": {"id": 42}}}}, h)
+    assert [g[:2] for g in got] == [("STOP", "A11"), ("GO", "B22")]
+
+def test_tg_parse():
+    assert telegram.parse_command("/status") == ("STATUS", None)
+    assert telegram.parse_command("/go c07") == ("GO", "C07")
+    assert telegram.parse_command("/start") == ("HELP", None)
+
+def test_status_overview(tmp_path, monkeypatch):
+    eng, sent, snap = make_engine(tmp_path, monkeypatch, [], [])
+    assert "No snapshot" in eng.status_text()
+    snap["facts"] = {"node": {"cpu_pct": 12.0, "mem_pct": 40.0, "uptime_h": 552, "load": None},
+                     "guests": {100: {"name": "pfSense", "status": "running", "cpu_pct": 2}, 127: {"name": "Minecraft", "status": "stopped", "cpu_pct": 0}}}
+    snap["checks"] = [{"name": "wan-1111", "target": "internet", "ok": True, "detail": "rtt min/avg/max/mdev = 12.5/12.6/12.7/0.1 ms"},
+                      {"name": "storage-backups", "target": "proxmox", "ok": True, "detail": "backups 65.4% used"},
+                      {"name": "pihole-dns", "target": "pihole", "ok": False, "detail": "timeout"}]
+    eng.tick()
+    t = eng.status_text()
+    print(t)
+    assert "2/3 checks" in t and "RAM 40.0%" in t and "1/2 running" in t and "Minecraft" in t and "12.6ms" in t and "pihole-dns" in t
+
+def test_status_triggers_analyst(tmp_path, monkeypatch):
+    eng, sent, snap = make_engine(tmp_path, monkeypatch, [], [])
+    eng.backend.brief = lambda prompt: "All quiet. Watch: backups at 65%."
+    eng.tick()
+    eng.on_command("STATUS", None, "/status")
+    for _ in range(50):
+        if any("Analyst (" in s for s in sent): break
+        time.sleep(0.02)
+    assert any("Guests" in s or "checks OK" in s for s in sent)
+    assert any("Watch: backups" in s for s in sent)
+    # second request while busy is refused politely, not queued
+    eng.briefing.acquire(); eng.on_command("STATUS", None, "/status"); eng.briefing.release()
+    assert any("already on it" in s for s in sent)
+
+def test_analyst_failure_is_graceful(tmp_path, monkeypatch):
+    eng, sent, snap = make_engine(tmp_path, monkeypatch, [], [])
+    def boom(p): raise TimeoutError()
+    eng.backend.brief = boom
+    eng.tick(); eng.on_command("STATUS", None, "/status")
+    for _ in range(50):
+        if any("gave up" in s for s in sent): break
+        time.sleep(0.02)
+    assert any("gave up" in s for s in sent)
+
+
+# ---- package-level pieces ----
+def test_example_config_boots(tmp_path, monkeypatch):
+    cfg = yaml.safe_load(open(pathlib.Path(__file__).parent.parent / "config.example.yaml"))
+    cfg.update(db_path=str(tmp_path / "x.db"), decision_log=str(tmp_path / "d.jsonl"), checks=[])
+    from overseer.main import Engine
+    eng = Engine(cfg)
+    assert eng.pve is None and eng.switch is None and "host" in eng.targets
+
+
+def test_notifier_factory(tmp_path):
+    from overseer.notifiers import make_notifier
+    from overseer.state import State
+    st = State(str(tmp_path / "s.db"))
+    assert type(make_notifier({"notifier": {"type": "telegram"}}, st)).__name__ == "Telegram"
+    d = make_notifier({"notifier": {"type": "discord", "channel_id": "1", "owner_id": "2", "guild_id": "3"}}, st)
+    assert type(d).__name__ == "Discord" and d.owner_id == 2
+
+
+def test_discord_registers_commands(tmp_path, monkeypatch):
+    """Boot the Discord notifier with a fake login and check slash commands + button routing wire up."""
+    import discord, asyncio, threading
+    from overseer.notifiers.discord_bot import Discord, BTN
+    from overseer.state import State
+    captured = {}
+    async def fake_start(self, token):
+        captured["tree"] = self._connection._command_tree
+    monkeypatch.setattr(discord.Client, "start", fake_start)
+    monkeypatch.setenv("DISCORD_TOKEN", "x")
+    d = Discord({"channel_id": "1", "owner_id": "2", "guild_id": "3"}, State(str(tmp_path / "s.db")))
+    t = threading.Thread(target=d._run, args=(lambda *a: None,)); t.start(); t.join(5)
+    names = {c.name for c in captured["tree"].get_commands(guild=discord.Object(id=3))}
+    assert names == {"status", "auto", "watch", "go", "stop"}
+    assert BTN.match("GO A12") and not BTN.match("GO a12; rm -rf")
+
+
+def test_actions_route_power_to_hypervisor():
+    from overseer import actions
+    class HV:
+        def power(self, a, t): return f"{a} {t['vmid']}"
+    ok, d = actions.execute("reboot_vm", "", "x", {"vmid": 5, "kind": "vm"}, HV(), dry_run=False)
+    assert ok and d == "reboot 5"
+    ok, d = actions.execute("start_vm", "", "x", {"vmid": 5}, None, dry_run=False)
+    assert not ok and "no hypervisor" in d
+
+
+def test_esxi_collect_with_fake_vsphere(monkeypatch):
+    """Exercise the ESXi backend against fake pyVmomi objects."""
+    from types import SimpleNamespace as N
+    from overseer.hypervisors.esxi import ESXi
+    vm = N(_moId="vm-1", name="router", runtime=N(powerState="poweredOn"),
+           summary=N(config=N(memorySizeMB=1024), runtime=N(powerState="poweredOn", maxCpuUsage=2000),
+                     quickStats=N(overallCpuUsage=500, guestMemoryUsage=512)),
+           guest=N(toolsRunningStatus="guestToolsRunning"), RebootGuest=lambda: None)
+    ds = N(name="datastore1", summary=N(capacity=100, freeSpace=10))
+    host = N(name="esx1", datastore=[ds], summary=N(quickStats=N(overallCpuUsage=1000, overallMemoryUsage=4096, uptime=7200),
+                                                     hardware=N(cpuMhz=2000, numCpuCores=4, memorySize=16 * 1024 ** 3)))
+    e = ESXi.__new__(ESXi); e.cfg = {}; e.si = None
+    monkeypatch.setattr(e, "_vms", lambda: [vm]); monkeypatch.setattr(e, "_hosts", lambda: [host])
+    checks, facts = e.collect({"router": {"kind": "vm", "vmname": "router"}})
+    byname = {c["name"]: c for c in checks}
+    assert facts["node"]["cpu_pct"] == 12.5 and facts["guests"]["vm-1"]["cpu_pct"] == 25.0
+    assert byname["guest-router-running"]["ok"] and not byname["storage-datastore1"]["ok"]   # 90% used
+    assert "guest reboot" in e.power("reboot", {"vmname": "router"})
+
+
+def test_wizard_yaml_roundtrip():
+    import sys; sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+    import setup as S
+    cfg = yaml.safe_load(open(pathlib.Path(__file__).parent.parent / "config.example.yaml"))
+    cfg["targets"] = T; cfg["notifier"]["chat_id"] = "123"; cfg["lab_description"] = "lab: #1, with 'quotes'"
+    assert yaml.safe_load(S.to_yaml(cfg)) == cfg
+
+
+def test_wizard_end_to_end_plain(tmp_path, monkeypatch):
+    """Walk the whole wizard in plain mode with scripted answers and a fake network."""
+    import sys, builtins, getpass, json as _j
+    sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+    monkeypatch.setenv("OVERSEER_PLAIN", "1")
+    for k in ("PVE_URL", "PVE_TOKEN_ID", "PVE_TOKEN", "PVE_NODE", "OVERSEER_LLM"):
+        monkeypatch.delenv(k, raising=False)
+    import importlib, setup as S
+    importlib.reload(S)
+
+    def fake_http(method, url, headers=None, body=None, verify=True, timeout=15):
+        if url.endswith("/nodes"):
+            return 200, {"data": [{"node": "pve"}]}
+        if url.endswith("/cluster/resources"):
+            return 200, {"data": [{"type": "node", "node": "pve"},
+                                  {"type": "qemu", "vmid": 100, "name": "pfSense", "status": "running", "node": "pve"},
+                                  {"type": "qemu", "vmid": 121, "name": "web", "status": "running", "node": "pve"},
+                                  {"type": "qemu", "vmid": 9000, "name": "tmpl", "status": "stopped", "node": "pve", "template": 1},
+                                  {"type": "lxc", "vmid": 200, "name": "radio", "status": "running", "node": "pve"}]}
+        if "getMe" in url:
+            return 200, {"ok": True, "result": {"username": "test_bot"}}
+        if "getUpdates" in url and "timeout=10" in url:
+            return 200, {"ok": True, "result": [{"update_id": 5, "message": {"chat": {"id": 777, "type": "private"}, "from": {"username": "me"}}}]}
+        return 200, {"ok": True, "result": []}
+    monkeypatch.setattr(S, "http", fake_http)
+    monkeypatch.setattr(S, "default_gateway", lambda: "10.0.0.1")
+    monkeypatch.setattr(S, "dns_servers", lambda: ["10.0.0.53"])
+    answers = iter([
+        "",            # welcome [Enter]
+        "my test lab", # description
+        "1",           # hypervisor: proxmox
+        "https://10.0.0.10:8006", "overseer@pve!t",   # url, token id  (secret via getpass)
+        "",            # proxmox token msg [Enter] (msg comes first — consumed above order-insensitively)
+        "",            # watch checklist: keep defaults
+        "",            # critical checklist: keep suggested (pfSense)
+        "1",           # telegram
+        "",            # botfather msg
+        "",            # pair msg
+        "",            # paired msg
+        "1",           # ollama local
+        "n",           # extra checks
+        "n",           # switch
+        "n",           # heartbeat
+        "",            # done msg
+    ] + [""] * 10)
+    monkeypatch.setattr(builtins, "input", lambda p="": next(answers))
+    secrets = iter(["pve-secret", "123:TOKEN"])
+    monkeypatch.setattr(getpass, "getpass", lambda p="": next(secrets))
+    monkeypatch.setattr(sys, "argv", ["setup.py", "--out-dir", str(tmp_path)])
+    S.main()
+    cfg = yaml.safe_load(open(tmp_path / "config.yaml"))
+    sec = open(tmp_path / "secrets.env").read()
+    assert cfg["notifier"] == {"type": "telegram", "token_env": "TG_TOKEN", "chat_id": "777"}
+    assert cfg["hypervisor"]["node"] == "pve" and cfg["targets"]["pfsense"]["floor_tier"] == 3
+    assert "tmpl" not in cfg["targets"]           # templates are never targets
+    assert "reboot_ct" in cfg["targets"]["radio"]["actions"] and cfg["checks"][0]["host"] == "10.0.0.1"
+    assert "PVE_TOKEN=pve-secret" in sec and "TG_TOKEN=123:TOKEN" in sec
+    assert oct((tmp_path / "secrets.env").stat().st_mode)[-3:] == "600"
+    from overseer.main import Engine   # the written config must boot the engine
+    cfg.update(db_path=str(tmp_path / "e.db"), decision_log=str(tmp_path / "d.jsonl"))
+    Engine(cfg)
+
+
+def test_proxmox_cluster(monkeypatch):
+    from overseer.hypervisors.proxmox import Proxmox
+    res = [
+        {"type": "node", "node": "a", "status": "online", "cpu": 0.5, "maxcpu": 8, "mem": 8, "maxmem": 16, "uptime": 3600},
+        {"type": "node", "node": "b", "status": "online", "cpu": 0.1, "maxcpu": 8, "mem": 15, "maxmem": 16, "uptime": 7200},
+        {"type": "node", "node": "c", "status": "offline"},
+        {"type": "qemu", "vmid": 100, "name": "fw", "status": "running", "node": "b", "cpu": 0.02, "mem": 1, "maxmem": 2},
+        {"type": "lxc", "vmid": 200, "name": "ct", "status": "stopped", "node": "a", "maxmem": 1},
+        {"type": "storage", "storage": "ceph", "node": "a", "shared": 1, "status": "available", "disk": 50, "maxdisk": 100},
+        {"type": "storage", "storage": "ceph", "node": "b", "shared": 1, "status": "available", "disk": 50, "maxdisk": 100},
+        {"type": "storage", "storage": "local-lvm", "node": "a", "status": "available", "disk": 90, "maxdisk": 100},
+        {"type": "storage", "storage": "local-lvm", "node": "b", "status": "available", "disk": 10, "maxdisk": 100},
+    ]
+    p = Proxmox({"url": "https://x:8006", "token_id": "t"})
+    posted = []
+    monkeypatch.setattr(p, "get", lambda path: res)
+    monkeypatch.setattr(p, "post", lambda path: posted.append(path))
+    checks, facts = p.collect({"fw": {"kind": "vm", "vmid": 100}, "ct": {"kind": "ct", "vmid": 200}})
+    by = {c["name"]: c for c in checks}
+    assert facts["node"]["name"] == "cluster (2 nodes)" and facts["node"]["cpu_pct"] == 30.0 and len(facts["nodes"]) == 2
+    assert not by["node-c-online"]["ok"] and not by["node-b-mem"]["ok"]            # offline node, 94% RAM node
+    assert by["guest-100-running"]["ok"] and "on b" in by["guest-100-running"]["detail"]
+    assert not by["guest-200-running"]["ok"]
+    assert sum(1 for c in checks if c["name"].startswith("storage-ceph")) == 1      # shared storage counted once
+    assert not by["storage-a-local-lvm"]["ok"] and by["storage-b-local-lvm"]["ok"]
+    assert "on b" in p.power("reboot", {"kind": "vm", "vmid": 100}) and posted[-1] == "/nodes/b/qemu/100/status/reboot"
+    res[3]["node"] = "a"; p._where.pop(100)                                         # migrated since last sweep
+    p.power("start", {"kind": "vm", "vmid": 100})
+    assert posted[-1] == "/nodes/a/qemu/100/status/start"
+
+
+def test_esxi_multi_host(monkeypatch):
+    from types import SimpleNamespace as N
+    from overseer.hypervisors.esxi import ESXi
+    ds = N(name="shared-nfs", summary=N(capacity=100, freeSpace=50))
+    def host(name, cpu, state="connected"):
+        return N(name=name, datastore=[ds], runtime=N(connectionState=state),
+                 summary=N(quickStats=N(overallCpuUsage=cpu, overallMemoryUsage=1024, uptime=3600),
+                           hardware=N(cpuMhz=1000, numCpuCores=4, memorySize=8 * 1024 ** 3)))
+    e = ESXi.__new__(ESXi); e.cfg = {}; e.si = None
+    monkeypatch.setattr(e, "_vms", lambda: [])
+    monkeypatch.setattr(e, "_hosts", lambda: [host("esx1", 1000), host("esx2", 3000), host("esx3", 0, "disconnected")])
+    checks, facts = e.collect({})
+    by = {c["name"]: c for c in checks}
+    assert facts["node"]["name"] == "2 ESXi hosts" and facts["node"]["cpu_pct"] == 50.0
+    assert not by["host-esx3-online"]["ok"]
+    assert sum(1 for c in checks if c["name"] == "storage-shared-nfs") == 1
+
+
+def test_checks_run_in_parallel(monkeypatch):
+    import time as _t
+    from overseer import collectors as C
+    monkeypatch.setattr(C, "_ping", lambda h: (_t.sleep(0.5), (False, "timeout"))[1])
+    t0 = _t.time()
+    out = C.run_checks([{"name": f"c{i}", "type": "ping", "host": "x"} for i in range(40)] + [{"name": "off", "type": "ping", "host": "x", "disabled": True}])
+    assert _t.time() - t0 < 2 and [c["name"] for c in out] == [f"c{i}" for i in range(40)]

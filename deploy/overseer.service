@@ -1,0 +1,15 @@
+[Unit]
+Description=Lab Overseer (AI homelab monitor)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=overseer
+WorkingDirectory=/opt/overseer
+EnvironmentFile=-/etc/overseer/secrets.env
+ExecStart=/opt/overseer/venv/bin/python -m overseer.main -c /etc/overseer/config.yaml
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
