@@ -61,6 +61,8 @@
 # status_top_ram: "🧮 Top RAM: {list}"
 #   placeholders: {list}
 # status_storage: "💾 {list}"
+#   placeholders: {running} {total} {bad}
+# status_containers: "🐳 Containers: {running}/{total} healthy{bad}"
 #   placeholders: {ok} {total}
 # status_switch: "🔌 Switch: {ok}/{total} watched ports healthy"
 #   placeholders: {list}

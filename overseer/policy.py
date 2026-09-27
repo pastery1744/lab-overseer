@@ -7,7 +7,8 @@ Tiers:
 """
 from dataclasses import dataclass
 
-ALLOWED_ACTIONS = {"none", "start_vm", "reboot_vm", "start_ct", "reboot_ct", "restart_service"}
+ALLOWED_ACTIONS = {"none", "start_vm", "reboot_vm", "start_ct", "reboot_ct", "restart_service", "restart_container"}
+ARG_ACTIONS = {"restart_service", "restart_container"}
 
 
 @dataclass
@@ -43,7 +44,7 @@ def decide(incident: dict, targets: dict, recent_actions: int, max_actions_per_h
             notes.append(f"floor for {tname} is {floor}")
             tier = floor
         allowed = t.get("actions", [])
-        key = f"restart_service:{arg}" if action == "restart_service" else action
+        key = f"{action}:{arg}" if action in ARG_ACTIONS else action
         if action not in ALLOWED_ACTIONS or (action != "none" and key not in allowed):
             notes.append(f"action '{key}' not whitelisted for {tname}")
             action, arg = "none", ""

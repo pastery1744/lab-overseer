@@ -62,6 +62,7 @@ The wizard runs automatically during install. Use arrow keys to move, **Space** 
 
 1. **What to watch.**
    - **This server itself:** for a plain Ubuntu/Debian box. It lists the services running on it with common apps (nginx, docker, databases…) pre-ticked, and watches CPU, RAM, disks and load. Services that could lock you out if restarted (like SSH) are alert-only.
+     If **Docker** is installed, it also lists your containers, with running ones pre-ticked. It alerts when a container stops or goes *unhealthy* and can restart it for you. Database containers (Postgres, MySQL, Redis…) are treated as critical.
    - **Proxmox / ESXi:** it connects and shows your VMs with tick boxes, running ones pre-ticked. Then it asks which are **critical** (router, firewall, domain controllers, NAS) and pre-ticks its guesses from their names. Critical ones always need your approval and are never rebooted casually.
    - **Just the network:** pings, websites and ports only.
 2. **Chat app.**
@@ -117,13 +118,13 @@ It starts in **watch mode**. Let it run for a few days, see what it *would* have
 ## How it keeps you safe
 
 - **The AI can't run commands.** It can only pick from a short list of fixes you allowed for each machine. Plain code, not the AI, decides whether anything happens.
-- **Only three kinds of fix exist:** start a VM, reboot a VM, or restart one named service. There's no delete, shutdown or config change anywhere in the code.
+- **Only four kinds of fix exist:** start a VM, reboot a VM, restart one named service, or restart one named Docker container. There's no delete, shutdown or config change anywhere in the code.
 - **You approve every fix**, and watch mode means even approved fixes are simulated until you switch to `/auto`.
 - **Critical machines** (`floor_tier: 3`) are always treated as serious, no matter what the AI thinks.
 - **Security-looking issues** are hands-off, always.
 - **Repeat protection:** if the same machine needs fixing more than twice an hour, it stops and escalates to you.
 - **Locked to you:** the bot ignores everyone except your chat (Telegram) or your user ID (Discord).
-- **Minimal access:** the Proxmox account can only view and power VMs on and off. Service access is limited to restarting the exact services you list.
+- **Minimal access:** the Proxmox account can only view and power VMs on and off. Service access is limited to restarting the exact services you list. For Docker it gets a sudo rule for one read-only listing command plus restarting only your chosen containers. It's never added to the `docker` group, since that's effectively root.
 - **Everything is logged:** every AI decision and every action, real or simulated.
 
 ---
@@ -192,8 +193,10 @@ checks:
 local:
   services: [nginx, docker, postgresql]   # systemd units to watch
   disks: ["/", "/srv"]                   # warn above 85% full
+  containers: [web, db]                  # Docker containers to watch
 targets:
   nginx: {kind: service, local: true, actions: ["restart_service:nginx"]}
+  web:   {kind: container, local: true, actions: ["restart_container:web"]}
 ```
 After editing local services by hand, run `overseer` → *Restart*. That also refreshes the rule that lets it restart exactly those services.
 

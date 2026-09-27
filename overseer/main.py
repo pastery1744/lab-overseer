@@ -108,6 +108,10 @@ class Engine:
             L.append(M("status_top_cpu", list=", ".join(f"{v['name']} {v['cpu_pct']}%" for v in top)))
             topm = sorted(g.values(), key=lambda v: -(v.get("mem_pct") or 0))[:3]
             L.append(M("status_top_ram", list=", ".join(f"{v['name']} {min(v['mem_pct'], 100):g}%" for v in topm if v.get("mem_pct") is not None)))
+        ct = s.get("facts", {}).get("containers") or {}
+        if ct:
+            badc = [k for k, v in ct.items() if v["state"] != "running" or v["health"] == "unhealthy"]
+            L.append(M("status_containers", running=len(ct) - len(badc), total=len(ct), bad=f" (down: {', '.join(badc)})" if badc else ""))
         stor = [c["detail"].replace(" used", "") for c in checks if c["name"].startswith("storage-")]
         if stor:
             L.append(M("status_storage", list=" · ".join(stor)))

@@ -3,6 +3,7 @@ import logging, shlex, subprocess, re
 
 log = logging.getLogger("actions")
 SERVICE_RE = re.compile(r"^[a-zA-Z0-9@._-]+$")
+CONTAINER_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
 POWER = {"start_vm": "start", "reboot_vm": "reboot", "start_ct": "start", "reboot_ct": "reboot"}
 
 
@@ -14,6 +15,13 @@ def execute(action, arg, target_name, target, hv, dry_run):
             if hv is None:
                 return False, "no hypervisor configured"
             return True, hv.power(POWER[action], target)
+        if action == "restart_container":
+            if not CONTAINER_RE.match(arg):
+                return False, "bad container name"
+            import shutil
+            d = shutil.which("docker") or "/usr/bin/docker"
+            r = subprocess.run(["sudo", "-n", d, "restart", arg], capture_output=True, text=True, timeout=120)
+            return r.returncode == 0, (r.stdout + r.stderr).strip()[-200:] or "restarted"
         if action == "restart_service":
             if not SERVICE_RE.match(arg):
                 return False, "bad service name"

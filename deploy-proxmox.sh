@@ -7,6 +7,8 @@
 # runs the setup wizard, installs, and starts. Never touches an existing install without asking. Deletes nothing.
 set -euo pipefail
 export LC_ALL=C
+# dialogs need UTF-8 to draw arrows/dashes; command output parsing stays in C
+wt(){ LC_ALL=C.UTF-8 LANG=C.UTF-8 whiptail "$@"; }
 SRC="$(cd "$(dirname "$0")" && pwd)"
 T="Lab Overseer"
 command -v pct >/dev/null || { echo "This isn't a Proxmox host. On ESXi or anything else: make a Debian VM and run ./install.sh inside it."; exit 1; }
@@ -15,11 +17,11 @@ command -v whiptail >/dev/null || apt-get install -y -qq whiptail >/dev/null 2>&
 WT=$(command -v whiptail || true); [ -n "${OVERSEER_PLAIN:-}" ] && WT=""
 
 # ---------- tiny dialog helpers (whiptail, or plain prompts) ----------
-msg(){ if [ -n "$WT" ]; then whiptail --title "$T" --msgbox "$1" 16 74; else echo -e "\n$1\n"; read -rp "[Enter] " _; fi; }
+msg(){ if [ -n "$WT" ]; then wt --title "$T" --msgbox "$1" 16 74; else echo -e "\n$1\n"; read -rp "[Enter] " _; fi; }
 # yesno: 0=yes 1=no 255=Esc.  input/menu: print the answer; exit 1 means Back (or Esc).
-yesno(){ if [ -n "$WT" ]; then whiptail --title "$T" ${3:+--yes-button "$3"} ${4:+--no-button "$4"} --yesno "$1" "${2:-14}" 74; else read -rp "$1 (y/n/back): " a; [[ "$a" =~ ^[Bb] ]] && return 255; [[ "$a" =~ ^[Yy] ]]; fi; }
-input(){ if [ -n "$WT" ]; then whiptail --title "$T" --cancel-button Back --inputbox "$1" 10 74 "$2" 3>&1 1>&2 2>&3; else read -rp "$1 [$2] (or 'back'): " v; [ "$v" = back ] && return 1; echo "${v:-$2}"; fi; }
-menu(){ local q=$1; shift; if [ -n "$WT" ]; then whiptail --title "$T" --cancel-button "${MENU_CANCEL:-Back}" --menu "$q" 18 74 8 "$@" 3>&1 1>&2 2>&3; else
+yesno(){ if [ -n "$WT" ]; then wt --title "$T" ${3:+--yes-button "$3"} ${4:+--no-button "$4"} --yesno "$1" "${2:-14}" 74; else read -rp "$1 (y/n/back): " a; [[ "$a" =~ ^[Bb] ]] && return 255; [[ "$a" =~ ^[Yy] ]]; fi; }
+input(){ if [ -n "$WT" ]; then wt --title "$T" --cancel-button Back --inputbox "$1" 10 74 "$2" 3>&1 1>&2 2>&3; else read -rp "$1 [$2] (or 'back'): " v; [ "$v" = back ] && return 1; echo "${v:-$2}"; fi; }
+menu(){ local q=$1; shift; if [ -n "$WT" ]; then wt --title "$T" --cancel-button "${MENU_CANCEL:-Back}" --menu "$q" 18 74 8 "$@" 3>&1 1>&2 2>&3; else
   echo "$q" >&2; local i=1 keys=(); while [ $# -gt 0 ]; do echo "  $i) $2" >&2; keys+=("$1"); shift 2; i=$((i+1)); done
   read -rp "choice [1] (or 'back'): " c; [ "$c" = back ] && return 1; echo "${keys[$(( ${c:-1} - 1 ))]}"; fi; }
 say(){ echo -e "\n\033[1;36m== $*\033[0m"; }

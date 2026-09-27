@@ -468,3 +468,63 @@ def test_this_server_mode(tmp_path, monkeypatch):
     monkeypatch.setattr(actions.subprocess, "run", fake_run)
     ok, _ = actions.execute("restart_service", "nginx", "nginx", t["nginx"], None, dry_run=False)
     assert ok and calls[0] == ["sudo", "-n", "/usr/bin/systemctl", "restart", "nginx"]
+
+
+def test_docker_containers(tmp_path, monkeypatch):
+    import subprocess as sp, json as _j
+    from overseer import localhost as LH, policy as POL
+    rows = [{"Names": "web", "Image": "nginx:1.27", "State": "running", "Status": "Up 3 hours (healthy)"},
+            {"Names": "db", "Image": "postgres:16", "State": "running", "Status": "Up 3 hours (unhealthy)"},
+            {"Names": "old", "Image": "busybox", "State": "exited", "Status": "Exited (0) 2 days ago"}]
+    calls = []
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return sp.CompletedProcess(cmd, 0, "\n".join(_j.dumps(r) for r in rows), "")
+    monkeypatch.setattr(LH, "docker_bin", lambda: "/usr/bin/docker")
+    monkeypatch.setattr(LH.subprocess, "run", fake_run)
+    monkeypatch.setattr(LH.os, "geteuid", lambda: 1000)
+    cs = LH.list_containers()
+    assert calls[0][:3] == ["sudo", "-n", "/usr/bin/docker"] and calls[0][-1] == "{{json .}}"   # matches the sudoers rule exactly
+    assert {c["name"]: c["health"] for c in cs} == {"web": "healthy", "db": "unhealthy", "old": ""}
+    monkeypatch.setattr(LH, "_cpu_pct", lambda interval=0.5: 1.0)
+    checks, facts = LH.LocalHost({"containers": ["web", "db", "gone"], "disks": []}).collect()
+    by = {c["name"]: c for c in checks}
+    assert by["ctr-web"]["ok"] and not by["ctr-db"]["ok"] and not by["ctr-gone"]["ok"] and "missing" in by["ctr-gone"]["detail"]
+    assert set(facts["containers"]) == {"web", "db"}
+    # policy: container restart only when whitelisted for that exact container
+    T2 = {"web": {"kind": "container", "local": True, "actions": ["restart_container:web"]}}
+    assert POL.decide({"target": "web", "tier": 2, "action": "restart_container", "action_arg": "web"}, T2, 0).action == "restart_container"
+    assert POL.decide({"target": "web", "tier": 2, "action": "restart_container", "action_arg": "db"}, T2, 0).action == "none"
+
+
+def test_wizard_docker_step(tmp_path, monkeypatch):
+    import sys, builtins, getpass, importlib
+    sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+    monkeypatch.setenv("OVERSEER_PLAIN", "1")
+    for k in ("PVE_URL", "PVE_TOKEN_ID", "PVE_TOKEN", "PVE_NODE", "OVERSEER_LLM"):
+        monkeypatch.delenv(k, raising=False)
+    import setup as S
+    from overseer import localhost as LH
+    importlib.reload(S)
+    monkeypatch.setattr(LH, "running_services", lambda: ["docker", "nginx"])
+    monkeypatch.setattr(LH, "list_containers", lambda use_sudo=True: [
+        {"name": "nginx", "image": "nginx:1.27", "state": "running", "health": "", "status": "Up"},
+        {"name": "db", "image": "postgres:16", "state": "running", "health": "", "status": "Up"},
+        {"name": "old", "image": "busybox", "state": "exited", "health": "", "status": "Exited"}])
+    monkeypatch.setattr(S, "real_disks", lambda: ["/"])
+    monkeypatch.setattr(S, "http", lambda m, url, *a, **k: (200, {"ok": True, "result": {"username": "b"}}) if "getMe" in url else
+                        (200, {"ok": True, "result": [{"update_id": 1, "message": {"chat": {"id": 9, "type": "private"}, "from": {}}}]}) if "timeout=10" in url
+                        else (200, {"ok": True, "result": []}))
+    monkeypatch.setattr(S, "default_gateway", lambda: None)
+    monkeypatch.setattr(S, "dns_servers", lambda: [])
+    answers = iter(["", "1", "", "",        # welcome; this server; services keep; containers keep (running ones)
+                    "1", "", "", "", "1", "n", "n", "n", "", ""] + [""] * 5)
+    monkeypatch.setattr(builtins, "input", lambda p="": next(answers))
+    monkeypatch.setattr(getpass, "getpass", lambda p="": "1:TOK")
+    monkeypatch.setattr(sys, "argv", ["setup.py", "--out-dir", str(tmp_path)])
+    S.main()
+    cfg = yaml.safe_load(open(tmp_path / "config.yaml"))
+    t, loc = cfg["targets"], cfg["local"]
+    assert loc["containers"] == ["nginx", "db"] and loc["container_targets"] == {"nginx": "nginx-container"}   # name clash with the nginx service
+    assert t["nginx-container"]["actions"] == ["restart_container:nginx"] and t["db"]["floor_tier"] == 3
+    assert "Docker containers: nginx, db" in cfg["lab_description"]

@@ -184,6 +184,26 @@ def setup_local():
             if n in ("docker", "containerd", "podman", "mysql", "mariadb", "postgresql"):
                 targets[n]["floor_tier"] = 3          # restarting these takes other things down with them
     local = {"services": chosen, "disks": real_disks()}
+
+    from overseer.localhost import list_containers
+    ctrs = list_containers(use_sudo=False) or []
+    if ctrs:
+        items = [(c["name"], f"{c['name']:<26} {c['image'].split('@')[0][-28:]:<28} {c['state']}", c["state"] == "running") for c in ctrs]
+        picked = UI.checklist("Docker detected! Which containers should it watch?\n(Running ones are pre-ticked. Space = toggle, Enter = done)", items)
+        DB = re.compile(r"postgres|mysql|mariadb|mongo|redis|influx|elastic|clickhouse|timescale", re.I)
+        local["containers"], local["container_targets"] = [], {}
+        for name in picked:
+            key = name if name not in targets else f"{name}-container"
+            img = next((c["image"] for c in ctrs if c["name"] == name), "")
+            t = {"kind": "container", "local": True, "actions": [f"restart_container:{name}"], "notes": f"docker: {img}"}
+            if DB.search(img) or DB.search(name):
+                t["floor_tier"] = 3            # databases: restarting drops every app that uses them
+            targets[key] = t
+            local["containers"].append(name)
+            if key != name:
+                local["container_targets"][name] = key
+        if not local["container_targets"]:
+            local.pop("container_targets")
     return local, targets
 
 
@@ -194,7 +214,9 @@ def auto_description(st):
     crit = [k for k, v in t.items() if v.get("floor_tier", 0) >= 3 and k not in ("host", "this-server")]
     if hv == "this":
         svcs = (st.get("local") or {}).get("services") or []
-        d = f"a single Linux server ({os.uname().nodename})" + (f" running {', '.join(svcs[:8])}" if svcs else "")
+        ctr = (st.get("local") or {}).get("containers") or []
+        d = f"a single Linux server ({os.uname().nodename})" + (f" running {', '.join(svcs[:8])}" if svcs else "") + \
+            (f"; Docker containers: {', '.join(ctr[:10])}" if ctr else "")
     elif hv in ("proxmox", "esxi"):
         n = len([v for v in t.values() if v.get("vmid") is not None or v.get("vmname")])
         d = f"a {'Proxmox' if hv == 'proxmox' else 'VMware ESXi'} homelab with {n} watched VMs/containers"
@@ -212,12 +234,14 @@ def build_targets(hv_type, guests):
                "internet": {"kind": "external", "actions": []}}
     if not guests:
         return targets
-    items = [(str(g["id"]), f"{g['name']:<24} {g['kind']}  {g['status']}", g["status"] == "running") for g in guests]
+    kinds = {"vm": "VM", "ct": "container"}
+    items = [(str(g["id"]), f"{str(g['id']):>5}  {g['name']:<22} {kinds.get(g['kind'], g['kind']):<10} {g['status']}",
+              g["status"] == "running") for g in guests]
     watch = set(UI.checklist("Which VMs/containers should it watch?\n(Space = toggle, Enter = done)", items))
     chosen = [g for g in guests if str(g["id"]) in watch]
     if not chosen:
         return targets
-    crit_items = [(str(g["id"]), g["name"], bool(CRITICAL_HINT.search(g["name"]))) for g in chosen]
+    crit_items = [(str(g["id"]), f"{str(g['id']):>5}  {g['name']}", bool(CRITICAL_HINT.search(g["name"]))) for g in chosen]
     crit = set(UI.checklist("Which ones are CRITICAL? (router, firewall, domain controllers, NAS…)\n"
                             "Critical machines always need your approval and are never rebooted casually.", crit_items))
     for g in chosen:
@@ -451,7 +475,8 @@ def main():
     def s_review():
         n_watch = len([t for t in st["targets"].values() if t.get("vmid") is not None or t.get("vmname")])
         ai = {"ollama": "local Ollama", "claude": "Claude API"}[st["llm"]["backend"]]
-        watching = {"this": f"this server + {len((st['local'] or {}).get('services') or [])} services",
+        lc = st["local"] or {}
+        watching = {"this": f"this server + {len(lc.get('services') or [])} services" + (f" + {len(lc['containers'])} containers" if lc.get("containers") else ""),
                     "proxmox": f"Proxmox — {n_watch} VMs/containers", "esxi": f"ESXi — {n_watch} VMs",
                     "none": "the network only"}[st["hv_type"]]
         if not UI.yes(f"Ready to save:\n\n  • Watching: {watching}\n"

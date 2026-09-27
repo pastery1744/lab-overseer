@@ -15,7 +15,7 @@ SCHEMA = {
             "summary": {"type": "string"},
             "tier": {"type": "integer", "minimum": 0, "maximum": 4},
             "security": {"type": "boolean"},
-            "action": {"type": "string", "enum": ["none", "start_vm", "reboot_vm", "start_ct", "reboot_ct", "restart_service"]},
+            "action": {"type": "string", "enum": ["none", "start_vm", "reboot_vm", "start_ct", "reboot_ct", "restart_service", "restart_container"]},
             "action_arg": {"type": "string"},
             "reasoning": {"type": "string"}},
         "required": ["target", "checks", "summary", "tier", "security", "action", "action_arg", "reasoning"]}}},
@@ -45,7 +45,7 @@ Severity tiers:
 0 info: expected/self-healing noise. 1 low: degraded, non-critical, no risk. 2 medium: a service down with a safe reversible fix.
 3 high: core infra (router/firewall, switches, the hypervisor host, domain controllers, anything with floor_tier 3). 4 critical: suspected compromise or data risk -> set security=true.
 
-Action: pick ONE from the target's allowed actions list, or "none". Prefer the least disruptive (restart_service before reboot). For restart_service put the service name in action_arg. Never invent targets; use target names exactly as given. If unsure, tier higher and action none.
+Action: pick ONE from the target's allowed actions list, or "none". Prefer the least disruptive (restart_service before reboot). For restart_service / restart_container put the service or container name in action_arg. Never invent targets; use target names exactly as given. If unsure, tier higher and action none.
 Keep summary under 120 chars, plain language. Output JSON only matching the schema. If nothing is wrong, return {"incidents": []}."""
 
 
@@ -159,6 +159,10 @@ def digest(snap, history, recent_incidents):
     L.append(f"guests ({len(g) - len(down)}/{len(g)} running; name cpu%/ram%): " + ", ".join(
         f"{v['name']} {v['cpu_pct']}/{min(v['mem_pct'] or 0, 100):g}" + ("" if v["status"] == "running" else " DOWN") for v in shown)
         + (f" (+{len(ordered) - len(shown)} quiet guests omitted)" if len(shown) < len(ordered) else ""))
+    ctrs = f.get("containers") or {}
+    if ctrs:
+        bad = [f"{k} {v['state']}{'/' + v['health'] if v['health'] else ''}" for k, v in ctrs.items() if v["state"] != "running" or v["health"] == "unhealthy"]
+        L.append(f"docker containers: {len(ctrs) - len(bad)}/{len(ctrs)} healthy" + (f" | problems: {', '.join(bad)}" if bad else ""))
     chk = snap.get("checks", [])
     L.append("storage: " + ", ".join(c["detail"] for c in chk if c["name"].startswith("storage-")))
     L.append("wan: " + ", ".join(c["detail"].split("=")[-1].strip() if c["ok"] else "DOWN" for c in chk if c["name"].startswith("wan-")))

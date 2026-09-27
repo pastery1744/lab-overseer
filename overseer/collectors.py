@@ -123,6 +123,8 @@ def snapshot(cfg, hv, switch, local=None):
         c, lf = local.collect()
         checks += c
         facts.setdefault("node", lf.get("node"))
+        if lf.get("containers"):
+            facts["containers"] = lf["containers"]
     if switch:
         checks += switch.collect()
     return {"ts": int(t0), "took_s": round(time.time() - t0, 1), "checks": checks, "facts": facts}

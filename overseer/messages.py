@@ -41,6 +41,7 @@ DEFAULTS = {
     "status_top_cpu": "🔥 Top CPU: {list}",
     "status_top_ram": "🧮 Top RAM: {list}",
     "status_storage": "💾 {list}",
+    "status_containers": "🐳 Containers: {running}/{total} healthy{bad}",
     "status_switch": "🔌 Switch: {ok}/{total} watched ports healthy",
     "status_wan": "🌐 WAN ping: {list}",
     "status_failing": "  ✗ {name}: {detail}",

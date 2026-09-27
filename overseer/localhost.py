@@ -1,6 +1,6 @@
 """Watch the machine the overseer runs on: CPU, RAM, disks, load, and chosen systemd services.
 Used for plain Ubuntu/Debian servers with no hypervisor."""
-import os, shutil, subprocess, time
+import json, os, shutil, subprocess, time
 
 # services worth pre-ticking in the wizard (anything else running is still offered, just unticked)
 COMMON = {"nginx", "apache2", "httpd", "caddy", "haproxy", "traefik", "docker", "containerd", "podman",
@@ -43,6 +43,36 @@ def _uptime_h():
     return round(float(open("/proc/uptime").read().split()[0]) / 3600, 1)
 
 
+def docker_bin():
+    return shutil.which("docker")
+
+
+def list_containers(use_sudo=True):
+    """[{name, image, state, health}] for every container, or [] if Docker isn't here/usable."""
+    d = docker_bin()
+    if not d:
+        return []
+    cmd = (["sudo", "-n"] if use_sudo and os.geteuid() != 0 else []) + [d, "ps", "-a", "--no-trunc", "--format", "{{json .}}"]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except Exception:
+        return None
+    if out.returncode != 0:
+        return None                      # None = docker present but unreadable (permissions) -> reported as a failing check
+    res = []
+    for line in out.stdout.splitlines():
+        try:
+            j = json.loads(line)
+        except ValueError:
+            continue
+        status = j.get("Status", "")
+        health = "unhealthy" if "(unhealthy)" in status else "starting" if "(health: starting)" in status else \
+                 "healthy" if "(healthy)" in status else ""
+        res.append({"name": j.get("Names", "").split(",")[0], "image": j.get("Image", ""), "state": j.get("State", ""),
+                    "status": status, "health": health})
+    return res
+
+
 def _active(unit):
     r = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True, timeout=10)
     return r.stdout.strip()
@@ -73,6 +103,19 @@ class LocalHost:
                     checks.append({"name": f"storage-{path}", "target": "this-server", "ok": False, "detail": f"{path}: {e}"})
         except Exception as e:
             checks.append({"name": "local-metrics", "target": "this-server", "ok": False, "detail": f"metrics error: {e}"[:200]})
+        watch = self.cfg.get("containers") or []
+        if watch:
+            cs = list_containers()
+            if cs is None:
+                checks.append({"name": "docker", "target": "docker", "ok": False, "detail": "can't read Docker (is it running? permissions?)"})
+            else:
+                by = {c["name"]: c for c in cs}
+                facts["containers"] = {c["name"]: {"state": c["state"], "health": c["health"], "image": c["image"]} for c in cs if c["name"] in watch}
+                for name in watch:
+                    c = by.get(name)
+                    ok = bool(c) and c["state"] == "running" and c["health"] != "unhealthy"
+                    detail = f"{name} " + (c["status"] if c else "missing (removed or renamed?)")
+                    checks.append({"name": f"ctr-{name}", "target": self.cfg.get("container_targets", {}).get(name, name), "ok": ok, "detail": detail[:120]})
         for svc in self.cfg.get("services", []):
             try:
                 state = _active(svc)
