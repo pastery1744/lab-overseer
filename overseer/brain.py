@@ -46,6 +46,7 @@ Severity tiers:
 3 high: core infra (router/firewall, switches, the hypervisor host, domain controllers, anything with floor_tier 3). 4 critical: suspected compromise or data risk -> set security=true.
 
 Action: pick ONE from the target's allowed actions list, or "none". Prefer the least disruptive (restart_service before reboot). For restart_service / restart_container put the service or container name in action_arg. Never invent targets; use target names exactly as given. If unsure, tier higher and action none.
+Evidence rules (strict): every incident MUST list in "checks" the exact names of failing_checks that prove it. Never report a problem that no failing check shows — metrics alone (e.g. a VM's RAM near 100%, which is normal host-side usage) are NOT an outage. If failing_checks is empty, return {"incidents": []}. Only call a router/gateway "down" when checks for things behind it are failing too; a single failed ping is weak evidence — tier it low.
 Keep summary under 120 chars, plain language. Output JSON only matching the schema. If nothing is wrong, return {"incidents": []}."""
 
 

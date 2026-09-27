@@ -530,7 +530,7 @@ def main():
             else:
                 i -= 1
 
-    cfg = {"lab_description": auto_description(st), "dry_run": True, "interval_seconds": 60, "review_interval_minutes": 60,
+    cfg = {"lab_description": auto_description(st), "dry_run": True, "interval_seconds": 60, "confirm_sweeps": 2, "review_interval_minutes": 60,
            "max_actions_per_hour": 2, "db_path": "/var/lib/overseer/overseer.db", "decision_log": "/var/lib/overseer/decisions.jsonl",
            "heartbeat_url": st["hb"], "llm": st["llm"], "notifier": st["notifier"], "hypervisor": st["hv"], "switch": st["switch"],
            "targets": st["targets"], "checks": st["checks"]}

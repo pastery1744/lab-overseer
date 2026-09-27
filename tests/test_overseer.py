@@ -66,7 +66,7 @@ class FakeBackend:
 
 
 def make_engine(tmp_path, monkeypatch, proposals, failing):
-    cfg = dict(CFG, notifier={'type': 'telegram', 'chat_id': '42'}, hypervisor={'type': 'none'}, db_path=str(tmp_path / "o.db"), decision_log=str(tmp_path / "d.jsonl"),
+    cfg = dict(CFG, confirm_sweeps=1, notifier={'type': 'telegram', 'chat_id': '42'}, hypervisor={'type': 'none'}, db_path=str(tmp_path / "o.db"), decision_log=str(tmp_path / "d.jsonl"),
                switch=None, checks=[], grace_minutes=0)
     eng = Engine(cfg)
     eng.backend = FakeBackend({"incidents": proposals})
@@ -574,3 +574,39 @@ def test_wizard_discord_autodetect(tmp_path, monkeypatch):
     n = yaml.safe_load(open(tmp_path / "config.yaml"))["notifier"]
     assert n == {"type": "discord", "token_env": "DISCORD_TOKEN", "guild_id": G, "channel_id": "4", "owner_id": "555555555555555555"}
     assert state["posted"].endswith("/channels/4/messages")
+
+
+
+def test_blip_is_debounced(tmp_path, monkeypatch):
+    """One failed sweep = no AI, no alert. Two in a row = triage."""
+    eng, sent, snap = make_engine(tmp_path, monkeypatch, [P()], ["pihole-dns"])
+    eng.cfg["confirm_sweeps"] = 2
+    calls = []
+    orig = eng.backend.triage
+    eng.backend.triage = lambda *a, **k: (calls.append(1), orig(*a, **k))[1]
+    eng.tick()
+    assert calls == [] and not eng.state.open_incidents()                 # blip: nothing
+    snap["checks"] = []
+    eng.tick()                                                             # recovered: streak resets
+    snap["checks"] = [{"name": "pihole-dns", "target": "pihole", "ok": False, "detail": "timeout"}]
+    eng.tick()
+    assert calls == []                                                      # 1st failure again, still a blip
+    eng.tick()
+    assert calls == [1] and len(eng.state.open_incidents()) == 1           # 2nd in a row: confirmed
+
+
+def test_ai_incident_without_evidence_is_discarded(tmp_path, monkeypatch):
+    """The 5:59 PM bug: an all-green review where the model invents 'pfSense is down'."""
+    hallucination = P(target="pfsense", checks=[], summary="pfSense appears down", action="start_vm", action_arg="", tier=3)
+    eng, sent, snap = make_engine(tmp_path, monkeypatch, [hallucination], [])
+    eng.last_review = 0                                                     # hourly review is due
+    calls = []
+    eng.backend.triage = lambda *a, **k: (calls.append(1), {"incidents": [hallucination]})[1]
+    eng.tick()
+    assert calls == []                                                      # all green: the AI isn't even asked
+    # and even if it runs with a real failure elsewhere, claims about non-failing checks are dropped
+    snap["checks"] = [{"name": "pihole-dns", "target": "pihole", "ok": False, "detail": "timeout"}]
+    eng.backend.triage = lambda *a, **k: {"incidents": [dict(hallucination, checks=["pfsense-gw-v20"]), P()]}
+    eng.last_failing = set(); eng.tick()
+    targets = [i["target"] for i in eng.state.open_incidents()]
+    assert targets == ["pihole"] and not any("pfSense" in s for s in sent)

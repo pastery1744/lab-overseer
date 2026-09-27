@@ -52,7 +52,8 @@ class Engine:
         self.lock = threading.Lock()
         if self.state.meta_get("dry_run") is None:
             self.state.meta_set("dry_run", int(cfg.get("dry_run", True)))
-        self.last_failing = set()
+        self.last_failing = set()        # confirmed failures from the previous sweep
+        self.streak = {}                 # check name -> consecutive failed sweeps
         self.last_snap = None
         self.history = collections.deque(maxlen=60)   # ~1h of compact per-tick metrics
         self.briefing = threading.Lock()
@@ -159,8 +160,17 @@ class Engine:
         self.wa.send(self.M("action_ok" if ok else "action_failed", id=inc["id"], target=inc["target"], detail=detail,
                            action=f"{inc['action']} {inc['action_arg']}".strip()))
 
-    def handle(self, proposal):
+    def handle(self, proposal, confirmed=None):
         checks = sorted(proposal.get("checks") or [])
+        if confirmed is not None:
+            # evidence rule: an incident must point at checks that are actually, confirmedly failing right now
+            real = sorted(set(checks) & confirmed)
+            if not real:
+                log.warning("discarded AI incident with no failing evidence: %s — %s (claimed checks: %s)",
+                            proposal.get("target"), proposal.get("summary"), checks or "none")
+                return
+            checks = real
+            proposal = dict(proposal, checks=real)
         fp = f"{proposal.get('target')}|{','.join(checks)}"
         if self.state.open_by_fingerprint(fp):
             return  # already tracking, don't spam
@@ -197,6 +207,13 @@ class Engine:
                              "failing": sorted(c["name"] for c in snap["checks"] if not c["ok"]),
                              "top_guests_cpu": sorted(((v["name"], v["cpu_pct"]) for v in g.values()), key=lambda x: -(x[1] or 0))[:3]})
         failing = {c["name"] for c in snap["checks"] if not c["ok"]}
+        # debounce: a check must fail `confirm_sweeps` sweeps in a row before anyone (AI or human) hears about it
+        need = max(1, int(self.cfg.get("confirm_sweeps", 2)))
+        self.streak = {n: self.streak.get(n, 0) + 1 for n in failing}
+        confirmed = {n for n, k in self.streak.items() if k >= need}
+        blips = failing - confirmed
+        if blips:
+            log.info("not yet confirmed (%d/%d sweeps): %s", 1, need, ", ".join(sorted(blips)))
         with self.lock:
             # resolve incidents whose checks all pass again
             for inc in self.state.open_incidents():
@@ -205,19 +222,20 @@ class Engine:
                     self.state.set_status(inc["id"], "resolved")
                     self.wa.send(self.M("recovered", id=inc["id"], target=inc["target"]))
             review_due = time.time() - self.last_review > self.cfg.get("review_interval_minutes", 60) * 60
-            new = failing - self.last_failing
-            self.last_failing = failing
+            new = confirmed - self.last_failing
+            self.last_failing = confirmed
             open_now = self.state.open_incidents()
         # LLM runs OUTSIDE the lock — CPU inference takes minutes and must not block Telegram commands
         props = []
-        if new or review_due:
+        # the AI is only consulted when something is really failing; an all-green lab has nothing to triage
+        if new or (review_due and confirmed):
             self.last_review = time.time()
             with self.llm:
                 props = brain.triage(self.backend, snap, self.targets, open_now,
                                      self.cfg["decision_log"], self.cfg["llm"].get("claude", {}).get("escalate_at_tier", 2))
         with self.lock:
             for p in props:
-                self.handle(p)
+                self.handle(p, confirmed)
             for inc in self.state.due():
                 self._run(inc)
         log.info("tick: %d checks, %d failing, took %ss", len(snap["checks"]), len(failing), snap["took_s"])
