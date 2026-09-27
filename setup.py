@@ -9,7 +9,7 @@ Pre-fill (skips questions) with env vars: PVE_URL PVE_NODE PVE_TOKEN_ID PVE_TOKE
 import argparse, json, os, re, ssl, subprocess, sys, time, urllib.error, urllib.parse, urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from overseer.tui import get_ui  # noqa: E402
+from overseer.tui import get_ui, Back  # noqa: E402
 
 UI = None
 
@@ -348,44 +348,76 @@ def main():
     ap.add_argument("--hypervisor", choices=["proxmox", "esxi", "none"])
     a = ap.parse_args()
     UI = get_ui()
-    sec = {}
+    sec, st = {}, {}
 
-    UI.msg("Welcome! This takes about 3 minutes.\n\nArrow keys move, Space ticks boxes, Enter confirms, Esc quits.\n"
-           "Nothing is saved until the very end.", "Lab Overseer setup")
-    lab = UI.ask("Describe your lab in one line (helps the AI understand it)",
-                 "a homelab" if not a.hypervisor else f"a {a.hypervisor.capitalize()} homelab")
+    # Each step fills `st`. Pressing Back anywhere inside a step returns to the previous step.
+    def s_welcome():
+        UI.msg("Welcome! This takes about 3 minutes.\n\nArrow keys move, Space ticks boxes, Enter confirms.\n"
+               "Back goes to the previous step. Esc pauses.\nNothing is saved until the very end.", "Lab Overseer setup")
+        st["lab"] = UI.ask("Describe your lab in one line (helps the AI understand it)",
+                           st.get("lab") or ("a homelab" if not a.hypervisor else f"a {a.hypervisor.capitalize()} homelab"))
 
-    hv_type = a.hypervisor or UI.menu("What runs your VMs?", [("proxmox", "Proxmox VE"), ("esxi", "VMware ESXi / vCenter"),
-                                                               ("none", "Nothing / not sure — just watch the network")], "proxmox")
-    hv, guests = ({"type": "none"}, [])
-    if hv_type == "proxmox":
-        hv, guests = setup_proxmox(sec)
-    elif hv_type == "esxi":
-        hv, guests = setup_esxi(sec)
-    targets = build_targets(hv_type, guests)
+    def s_hypervisor():
+        hv_type = a.hypervisor or UI.menu("What runs your VMs?", [("proxmox", "Proxmox VE"), ("esxi", "VMware ESXi / vCenter"),
+                                                                   ("none", "Nothing / not sure — just watch the network")],
+                                          st.get("hv_type", "proxmox"))
+        hv, guests = ({"type": "none"}, [])
+        if hv_type == "proxmox":
+            hv, guests = setup_proxmox(sec)
+        elif hv_type == "esxi":
+            hv, guests = setup_esxi(sec)
+        st.update(hv_type=hv_type, hv=hv, targets=build_targets(hv_type, guests))
 
-    kind = UI.menu("Where should alerts go?", [("telegram", "Telegram (easiest)"), ("discord", "Discord")], "telegram")
-    notifier = setup_telegram(sec) if kind == "telegram" else setup_discord(sec)
+    def s_notifier():
+        kind = UI.menu("Where should alerts go?", [("telegram", "Telegram (easiest)"), ("discord", "Discord")], st.get("kind", "telegram"))
+        st.update(kind=kind, notifier=setup_telegram(sec) if kind == "telegram" else setup_discord(sec))
 
-    llm = setup_llm(sec)
-    checks = build_checks(targets)
-    switch = setup_switch()
-    hb = ""
-    if UI.yes("Optional: get warned if the overseer itself goes offline?\n\n"
-              "Make a free check at healthchecks.io and paste its ping URL.", False):
-        hb = UI.ask("healthchecks.io ping URL")
+    def s_llm():
+        st["llm"] = setup_llm(sec)
 
-    cfg = {"lab_description": lab, "dry_run": True, "interval_seconds": 60, "review_interval_minutes": 60,
+    def s_checks():
+        st["checks"] = build_checks(st["targets"])
+
+    def s_switch():
+        st["switch"] = setup_switch()
+
+    def s_heartbeat():
+        st["hb"] = ""
+        if UI.yes("Optional: get warned if the overseer itself goes offline?\n\n"
+                  "Make a free check at healthchecks.io and paste its ping URL.", False):
+            st["hb"] = UI.ask("healthchecks.io ping URL", st.get("hb", ""))
+
+    def s_review():
+        n_watch = len([t for t in st["targets"].values() if t.get("vmid") is not None or t.get("vmname")])
+        ai = {"ollama": "local Ollama", "claude": "Claude API"}[st["llm"]["backend"]]
+        if not UI.yes(f"Ready to save:\n\n  • Lab: {st['lab']}\n  • Hypervisor: {st['hv_type']} — watching {n_watch} VMs/containers\n"
+                      f"  • Alerts: {st['kind'].capitalize()}\n  • AI: {ai}\n  • Network checks: {len(st['checks'])}\n"
+                      f"  • Switch: {'yes' if st['switch'] else 'no'}   • Heartbeat: {'yes' if st['hb'] else 'no'}\n\n"
+                      "Save this? (No = go back and change something)"):
+            raise Back
+
+    steps = [s_welcome, s_hypervisor, s_notifier, s_llm, s_checks, s_switch, s_heartbeat, s_review]
+    i = 0
+    while i < len(steps):
+        try:
+            steps[i]()
+            i += 1
+        except Back:
+            if i == 0:
+                if UI.yes("Quit setup? Nothing has been saved.", False):
+                    raise KeyboardInterrupt
+            else:
+                i -= 1
+
+    cfg = {"lab_description": st["lab"], "dry_run": True, "interval_seconds": 60, "review_interval_minutes": 60,
            "max_actions_per_hour": 2, "db_path": "/var/lib/overseer/overseer.db", "decision_log": "/var/lib/overseer/decisions.jsonl",
-           "heartbeat_url": hb, "llm": llm, "notifier": notifier, "hypervisor": hv, "switch": switch,
-           "targets": targets, "checks": checks}
-    cpath, _ = write_files(a.out_dir, cfg, sec)
+           "heartbeat_url": st["hb"], "llm": st["llm"], "notifier": st["notifier"], "hypervisor": st["hv"], "switch": st["switch"],
+           "targets": st["targets"], "checks": st["checks"]}
+    write_files(a.out_dir, cfg, sec)
+    llm = st["llm"]
     json.dump({"llm": llm["backend"], "local_ollama": llm["backend"] == "ollama" and "127.0.0.1" in llm["ollama"]["url"],
-               "notifier": kind, "hypervisor": hv_type}, open(os.path.join(a.out_dir, ".setup-summary.json"), "w"))
-    n_watch = len([t for t in targets.values() if t.get("vmid") is not None or t.get("vmname")])
-    UI.msg(f"All set!\n\n• Watching {n_watch} VMs/containers and {len(checks)} network checks\n• Alerts go to {kind.capitalize()}\n"
-           f"• AI: {'local Ollama' if llm['backend'] == 'ollama' else 'Claude'}\n\n"
-           "It starts in SAFE mode: it alerts you, and tapping Go only simulates the fix.\n"
+               "notifier": st["kind"], "hypervisor": st["hv_type"]}, open(os.path.join(a.out_dir, ".setup-summary.json"), "w"))
+    UI.msg("All set!\n\nIt starts in SAFE mode: it alerts you, and tapping Go only simulates the fix.\n"
            "Send /auto when you trust it.\n\nChange anything later by typing:  overseer", "Setup complete")
 
 

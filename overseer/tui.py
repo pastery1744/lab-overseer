@@ -7,6 +7,10 @@ import getpass, os, shutil, subprocess, sys
 TITLE = "Lab Overseer"
 
 
+class Back(Exception):
+    """User pressed Back — the wizard steps to the previous screen."""
+
+
 class Plain:
     gui = False
 
@@ -20,6 +24,8 @@ class Plain:
     def ask(self, q, default="", secret=False):
         p = f"{q}" + (f" [{default}]" if default and not secret else "") + ": "
         v = (getpass.getpass(p) if secret else input(p)).strip()
+        if v.lower() in ("<", "back"):
+            raise Back
         return v or default
 
     def yes(self, q, default=True):
@@ -33,7 +39,9 @@ class Plain:
             print(f"  {i}) {l}")
         d = next((str(i) for i, (k, _) in enumerate(items, 1) if k == default), "1")
         while True:
-            v = input(f"choice [{d}]: ").strip() or d
+            v = input(f"choice [{d}] (or 'back'): ").strip() or d
+            if v.lower() in ("<", "back"):
+                raise Back
             if v.isdigit() and 1 <= int(v) <= len(items):
                 return items[int(v) - 1][0]
             for k, _ in items:
@@ -45,7 +53,9 @@ class Plain:
         print(f"\n{q}")
         for i, (k, l, c) in enumerate(items, 1):
             print(f"  [{'x' if c else ' '}] {i}) {l}")
-        v = input("Enter to keep, or type numbers to use instead (e.g. 1,3,4): ").strip()
+        v = input("Enter to keep, numbers to use instead (e.g. 1,3,4), or 'back': ").strip()
+        if v.lower() in ("<", "back"):
+            raise Back
         if not v:
             return [k for k, _, c in items if c]
         pick = {int(x) for x in v.replace(" ", "").split(",") if x.isdigit()}
@@ -54,6 +64,10 @@ class Plain:
     def text(self, title, body):
         print(f"\n== {title}\n{body}\n")
         input("[Enter] ")
+
+
+class _Redo(Exception):
+    pass
 
 
 class Whiptail(Plain):
@@ -65,45 +79,63 @@ class Whiptail(Plain):
         w = min(cols - 4, width)
         r = subprocess.run(["whiptail", "--title", TITLE, *pre, args[0], args[1], str(h), str(w), *args[2:]],
                            stderr=subprocess.PIPE, text=True)
-        if r.returncode == 255:        # Esc
-            raise KeyboardInterrupt
+        if r.returncode == 255:        # Esc: don't just die — ask
+            self._escape()
         return r.returncode, r.stderr.strip()
 
+    def _escape(self):
+        r = subprocess.run(["whiptail", "--title", TITLE, "--nocancel", "--menu", "Paused. What would you like to do?", "12", "60", "3",
+                            "back", "Go back one step", "stay", "Keep going (redo this screen)", "quit", "Quit setup (nothing is saved)"],
+                           stderr=subprocess.PIPE, text=True)
+        choice = r.stderr.strip()
+        if choice == "quit":
+            raise KeyboardInterrupt
+        if choice == "back":
+            raise Back
+        raise _Redo
+
+    def _call(self, fn, *a, **kw):
+        while True:
+            try:
+                return fn(*a, **kw)
+            except _Redo:
+                continue
+
     def msg(self, text, title=TITLE):
-        self._run(["--msgbox", text], height=min(22, 8 + text.count("\n") + len(text) // 70))
+        self._call(self._run, ["--msgbox", text], height=min(22, 8 + text.count("\n") + len(text) // 70))
 
     def info(self, text):
         # non-blocking status line; whiptail infobox clears on next screen
         subprocess.run(["whiptail", "--title", TITLE, "--infobox", text, "8", "70"])
 
     def ask(self, q, default="", secret=False):
-        rc, v = self._run(["--passwordbox" if secret else "--inputbox", q, *([] if secret else [default])],
-                          height=10 + q.count("\n"))
+        rc, v = self._call(self._run, ["--passwordbox" if secret else "--inputbox", q, *([] if secret else [default])],
+                           height=10 + q.count("\n"), pre=("--cancel-button", "Back"))
         if rc == 1:
-            raise KeyboardInterrupt
+            raise Back
         return v or ("" if secret else default)
 
     def yes(self, q, default=True):
-        rc, _ = self._run(["--yesno", q], height=10 + q.count("\n") + len(q) // 70, pre=() if default else ("--defaultno",))
+        rc, _ = self._call(self._run, ["--yesno", q], height=10 + q.count("\n") + len(q) // 70, pre=() if default else ("--defaultno",))
         return rc == 0
 
     def menu(self, q, items, default=None):
         args = ["--menu", q, str(len(items))]
         for k, l in items:
             args += [str(k), l]
-        pre = ("--default-item", str(default)) if default is not None else ()
-        rc, v = self._run(args, height=min(22, 9 + len(items) + q.count("\n")), pre=pre)
+        pre = ("--cancel-button", "Back", *(("--default-item", str(default)) if default is not None else ()))
+        rc, v = self._call(self._run, args, height=min(22, 9 + len(items) + q.count("\n")), pre=pre)
         if rc != 0:
-            raise KeyboardInterrupt
+            raise Back
         return next(k for k, _ in items if str(k) == v)
 
     def checklist(self, q, items):
         args = ["--checklist", q, str(min(len(items), 14))]
         for k, l, c in items:
             args += [str(k), l, "ON" if c else "OFF"]
-        rc, v = self._run(args, height=min(24, 9 + len(items) + q.count("\n")))
+        rc, v = self._call(self._run, args, height=min(24, 9 + len(items) + q.count("\n")), pre=("--cancel-button", "Back"))
         if rc != 0:
-            raise KeyboardInterrupt
+            raise Back
         chosen = {x.strip('"') for x in v.split()}
         return [k for k, _, _ in items if str(k) in chosen]
 

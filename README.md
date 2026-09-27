@@ -58,7 +58,7 @@ The setup wizard walks you through the few things only you can do: creating the 
 
 ## The setup wizard
 
-The wizard runs automatically during install. Use arrow keys to move, **Space** to tick boxes, **Enter** to confirm and **Esc** to quit. It asks, in order:
+The wizard runs automatically during install. Use arrow keys to move, **Space** to tick boxes and **Enter** to confirm. **Back** goes to the previous step. **Esc** pauses, so you can go back, keep going, or quit. It asks, in order:
 
 1. **Describe your lab** in one line, e.g. *"Proxmox on a Dell R730 with a pfSense router"*. This gives the AI context.
 2. **Hypervisor.** It connects and shows a list of your VMs with tick boxes. Running ones are already ticked. Then it asks which are **critical** (router, firewall, domain controllers, NAS) and pre-ticks its guesses from their names. Critical ones always need your approval and are never rebooted casually.
@@ -70,7 +70,7 @@ The wizard runs automatically during install. Use arrow keys to move, **Space** 
 6. **Switch** (optional): IP, read-only community string, and which ports to watch.
 7. **Heartbeat** (optional): a free [healthchecks.io](https://healthchecks.io) link that warns you if the overseer itself goes offline.
 
-Nothing is saved until the end, so Esc or Ctrl-C is always safe. To run it again later, use the `overseer` menu → *Re-run setup*. Your old config is kept as a backup.
+Nothing is saved until you confirm on the final review screen, where **No** takes you back to change things. To run it again later, use the `overseer` menu → *Re-run setup*. Your old config is kept as a backup.
 
 ---
 

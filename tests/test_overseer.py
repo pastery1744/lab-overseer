@@ -388,3 +388,31 @@ def test_messages_reach_alerts_and_ai(tmp_path, monkeypatch):
     from overseer import brain
     assert "Talk like a pirate." in brain._sys(brain.SYSTEM) and "Talk like a pirate." in brain._sys(brain.BRIEF_SYSTEM)
     brain.set_lab("a homelab", "")
+
+
+def test_wizard_back_button(tmp_path, monkeypatch):
+    """'back' at the hypervisor menu returns to the lab question; the new answer wins."""
+    import sys, builtins, getpass, importlib
+    sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+    monkeypatch.setenv("OVERSEER_PLAIN", "1")
+    for k in ("PVE_URL", "PVE_TOKEN_ID", "PVE_TOKEN", "PVE_NODE", "OVERSEER_LLM"):
+        monkeypatch.delenv(k, raising=False)
+    import setup as S
+    importlib.reload(S)
+    monkeypatch.setattr(S, "http", lambda m, url, *a, **k: (200, {"ok": True, "result": {"username": "b"}}) if "getMe" in url else
+                        (200, {"ok": True, "result": [{"update_id": 1, "message": {"chat": {"id": 5, "type": "private"}, "from": {}}}]}) if "timeout=10" in url
+                        else (200, {"ok": True, "result": []}))
+    monkeypatch.setattr(S, "default_gateway", lambda: None)
+    monkeypatch.setattr(S, "dns_servers", lambda: [])
+    answers = iter(["", "first lab", "back",          # welcome, lab, BACK at hypervisor menu
+                    "", "second lab", "3",            # welcome again, new lab, hypervisor: none
+                    "1", "", "", "",                  # telegram + its three info screens
+                    "back",                           # BACK at the AI menu -> notifier step again
+                    "1", "", "", "",                  # telegram again
+                    "1", "n", "n", "n", "", ""] + [""] * 5)
+    monkeypatch.setattr(builtins, "input", lambda p="": next(answers))
+    monkeypatch.setattr(getpass, "getpass", lambda p="": "1:TOK")
+    monkeypatch.setattr(sys, "argv", ["setup.py", "--out-dir", str(tmp_path)])
+    S.main()
+    cfg = yaml.safe_load(open(tmp_path / "config.yaml"))
+    assert cfg["lab_description"] == "second lab" and cfg["hypervisor"]["type"] == "none" and cfg["notifier"]["chat_id"] == "5"
