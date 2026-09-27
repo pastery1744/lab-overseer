@@ -364,3 +364,27 @@ def test_checks_run_in_parallel(monkeypatch):
     t0 = _t.time()
     out = C.run_checks([{"name": f"c{i}", "type": "ping", "host": "x"} for i in range(40)] + [{"name": "off", "type": "ping", "host": "x", "disabled": True}])
     assert _t.time() - t0 < 2 and [c["name"] for c in out] == [f"c{i}" for i in range(40)]
+
+
+def test_messages_override(tmp_path, monkeypatch):
+    from overseer.messages import Messages
+    mp = tmp_path / "messages.yaml"
+    mp.write_text('recovered: "🎉 {target} is back ({id}) {bogus}"\nicons: {2: "⚠️"}\nai_style: "Be sarcastic."\nnot_a_key: "x"\n')
+    M = Messages(str(mp))
+    assert M("recovered", id="K41", target="pihole") == "🎉 pihole is back (K41) {bogus}"   # typo'd placeholder doesn't crash
+    assert M.icon(2) == "⚠️" and M.icon(4) == "🚨" and M.ai_style == "Be sarcastic."
+    assert Messages(str(tmp_path / "missing.yaml"))("help").startswith("Commands:")
+    (tmp_path / "broken.yaml").write_text("recovered: [unclosed\n")
+    assert Messages(str(tmp_path / "broken.yaml"))("recovered", id="A", target="b") == "✅ A b recovered."   # broken file → defaults
+
+
+def test_messages_reach_alerts_and_ai(tmp_path, monkeypatch):
+    mp = tmp_path / "m.yaml"
+    mp.write_text('alert: "HEY {target}: {summary}"\nalert_ask_go: "Fix with {action}?"\nai_style: "Talk like a pirate."\n')
+    monkeypatch.setitem(CFG, "messages_path", str(mp))
+    eng, sent, _ = make_engine(tmp_path, monkeypatch, [P()], ["pihole-dns"])
+    eng.tick()
+    assert any(s.startswith("HEY pihole: x") and "Fix with restart_service pihole-FTL?" in s for s in sent)
+    from overseer import brain
+    assert "Talk like a pirate." in brain._sys(brain.SYSTEM) and "Talk like a pirate." in brain._sys(brain.BRIEF_SYSTEM)
+    brain.set_lab("a homelab", "")

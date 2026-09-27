@@ -124,6 +124,7 @@ def main():
             ("service", "Let it restart a service on another machine"),
             ("logs", "View recent logs"),
             ("restart", "Restart the overseer"),
+            ("wording", "Change what the bot says (messages & AI tone)"),
             ("setup", "Re-run setup (change chat app, AI, VMs…)"),
             ("edit", "Edit config file (advanced)"),
             ("quit", "Quit")], "status")
@@ -151,6 +152,20 @@ def main():
         elif choice == "setup":
             if UI.yes("Re-run the full setup? Your current config is backed up first."):
                 os.system(f"{APP}/venv/bin/python {APP}/setup.py && chown overseer /etc/overseer/config.yaml /etc/overseer/secrets.env && systemctl restart overseer")
+        elif choice == "wording":
+            mp = "/etc/overseer/messages.yaml"
+            if not os.path.exists(mp):
+                sh(f"cp {APP}/messages.example.yaml {mp} && chown overseer {mp}")
+            UI.msg("You'll see every message the bot sends.\n\nTo change one: delete the '# ' at the start of its line, edit the text, "
+                   "then save (Ctrl-O, Enter) and exit (Ctrl-X).\n\nWords in {curly braces} are filled in automatically.", "Change wording")
+            os.system(f"${{EDITOR:-nano}} {mp}")
+            r = subprocess.run([f"{APP}/venv/bin/python", "-c", f"import sys;sys.path.insert(0,{APP!r});import yaml;"
+                                f"yaml.safe_load(open({mp!r}));from overseer.messages import Messages;Messages({mp!r});print('ok')"],
+                               text=True, capture_output=True)
+            if "ok" not in r.stdout:
+                UI.msg("That file has a typo, so the bot will ignore it and use the defaults.\n\n" + r.stderr[-400:], "Wording")
+            elif UI.yes("Restart the overseer so the new wording takes effect?"):
+                sh("systemctl restart overseer")
         elif choice == "edit":
             os.system(f"${{EDITOR:-nano}} {CFG}")
             if UI.yes("Restart the overseer to apply your changes?"):

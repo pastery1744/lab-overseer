@@ -22,11 +22,20 @@ SCHEMA = {
     "required": ["incidents"]}
 
 LAB = "a homelab"
+STYLE = ""
 
 
-def set_lab(desc):
-    global LAB
+def set_lab(desc, style=""):
+    """Lab description + optional owner style (from messages.yaml ai_style). Style shapes wording only;
+    the output schema, tiers and safety rules below always win."""
+    global LAB, STYLE
     LAB = desc or LAB
+    STYLE = style or ""
+
+
+def _sys(prompt):
+    p = prompt.replace("{lab}", LAB)
+    return p + (f"\n\nOwner's style preference for wording (never changes format, tiers or safety rules): {STYLE}" if STYLE else "")
 
 
 SYSTEM = """You are the overseer of {lab}.
@@ -95,7 +104,7 @@ class Ollama:
     def triage(self, prompt, escalate=False):
         r = requests.post(self.url + "/api/chat", timeout=self.timeout, json={
             "model": self.model, "stream": False, "format": SCHEMA, "keep_alive": -1, "options": {"temperature": 0.1, "num_ctx": 8192},
-            "messages": [{"role": "system", "content": SYSTEM.replace("{lab}", LAB)}, {"role": "user", "content": prompt}]})
+            "messages": [{"role": "system", "content": _sys(SYSTEM)}, {"role": "user", "content": prompt}]})
         r.raise_for_status()
         return json.loads(r.json()["message"]["content"])
 
@@ -104,7 +113,7 @@ class Ollama:
         r = requests.post(self.url + "/api/chat", timeout=150, json={
             "model": self.brief_model, "stream": False, "keep_alive": -1,
             "options": {"temperature": 0.3, "num_ctx": 8192, "num_predict": 220},
-            "messages": [{"role": "system", "content": BRIEF_SYSTEM.replace("{lab}", LAB)}, {"role": "user", "content": prompt}]})
+            "messages": [{"role": "system", "content": _sys(BRIEF_SYSTEM)}, {"role": "user", "content": prompt}]})
         r.raise_for_status()
         return r.json()["message"]["content"].strip()
 
@@ -123,7 +132,7 @@ class Claude:
         self.last_model = self.escalate_model if escalate else self.triage_model
         msg = self.client.messages.create(
             model=self.last_model, max_tokens=2000,
-            system=[{"type": "text", "text": SYSTEM.replace("{lab}", LAB), "cache_control": {"type": "ephemeral"}}],
+            system=[{"type": "text", "text": _sys(SYSTEM), "cache_control": {"type": "ephemeral"}}],
             tools=[{"name": "report", "description": "Report incidents", "input_schema": SCHEMA}],
             tool_choice={"type": "tool", "name": "report"},
             messages=[{"role": "user", "content": prompt}])
@@ -135,7 +144,7 @@ class Claude:
 
     def brief(self, prompt):
         msg = self.client.messages.create(model=self.triage_model, max_tokens=600,
-                                          system=BRIEF_SYSTEM.replace("{lab}", LAB), messages=[{"role": "user", "content": prompt}])
+                                          system=_sys(BRIEF_SYSTEM), messages=[{"role": "user", "content": prompt}])
         return "".join(b.text for b in msg.content if b.type == "text").strip()
 
 

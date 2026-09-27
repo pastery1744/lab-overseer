@@ -1,0 +1,85 @@
+# Lab Overseer — what the bot says.
+#
+# Everything here is commented out, so the built-in wording is used.
+# To change a message: remove the leading '# ' from its line and edit the text.
+# Then restart:  systemctl restart overseer   (or: overseer menu → Restart)
+#
+# {words} in curly braces get filled in automatically — keep the ones you want, drop the rest.
+# \n makes a new line. Emoji are fine. This file is never overwritten by updates.
+
+# How the AI talks (pick one line). Plain English. Changes tone/language only — never safety rules.
+# ai_style: "Be casual and a bit sarcastic."
+# ai_style: "Reply in Spanish."
+
+# Severity icons, 0 = noise … 4 = security
+# icons: {0: "·", 1: "🟡", 2: "🟠", 3: "🔴", 4: "🚨"}
+
+# ---- Lifecycle & commands ----
+#   placeholders: {ai} {mode}
+# online: "👁 Overseer online ({ai}, {mode})."
+# help: "Commands: /status · /auto · /watch · /go <id> · /stop <id>"
+# mode_auto: "🤖 AUTO — fixes you approve with Go will actually run"
+# mode_watch: "👀 WATCH — alerts only; Go just simulates"
+
+# ---- Incident alerts ----
+#   placeholders: {icon} {tier} {id} {target} {summary}
+# alert: "{icon} T{tier} [{id}] {target}: {summary}"
+#   placeholders: {reason}
+# alert_why: "Why: {reason}"
+#   placeholders: {policy}
+# alert_policy: "Policy: {policy}"
+#   placeholders: {action}
+# alert_ask_go: "Proposed: {action}. Tap Go / Stop."
+# alert_hands_off: "Not touching this. Your call."
+# alert_watch_note: " (watch mode — won't run)"
+#   placeholders: {id} {target}
+# recovered: "✅ {id} {target} recovered."
+#   placeholders: {id} {action} {target} {detail}
+# action_ok: "✅ {id} {action} on {target}: {detail}"
+#   placeholders: {id} {action} {target} {detail}
+# action_failed: "❌ {id} {action} on {target}: {detail}"
+#   placeholders: {id} {target}
+# cancelled: "✋ {id} cancelled. Still watching {target}."
+#   placeholders: {id}
+# no_pending: "No pending action {id}"
+
+# ---- /status overview ----
+#   placeholders: {mode} {ai}
+# status_header: "👁 Overseer · {mode} · {ai}"
+# status_no_data: "No snapshot yet — first sweep still running."
+#   placeholders: {dot} {ok} {total} {age}
+# status_checks: "{dot} {ok}/{total} checks OK · {age}s ago"
+#   placeholders: {name} {cpu} {ram} {days}
+# status_host: "🖥 {name}: CPU {cpu}% · RAM {ram}% · up {days}d"
+#   placeholders: {name} {cpu} {ram}
+# status_node: "   · {name}: CPU {cpu}% · RAM {ram}%"
+#   placeholders: {running} {total} {down}
+# status_guests: "📦 Guests: {running}/{total} running{down}"
+#   placeholders: {list}
+# status_top_cpu: "🔥 Top CPU: {list}"
+#   placeholders: {list}
+# status_top_ram: "🧮 Top RAM: {list}"
+#   placeholders: {list}
+# status_storage: "💾 {list}"
+#   placeholders: {ok} {total}
+# status_switch: "🔌 Switch: {ok}/{total} watched ports healthy"
+#   placeholders: {list}
+# status_wan: "🌐 WAN ping: {list}"
+#   placeholders: {name} {detail}
+# status_failing: "  ✗ {name}: {detail}"
+#   placeholders: {open} {day}
+# status_incidents: "🧾 {open} open · {day} in last 24h"
+# status_no_incidents: "🧾 No incidents in last 24h"
+#   placeholders: {icon} {id} {target} {summary} {status}
+# status_incident: "  {icon} {id} {target}: {summary} [{status}]"
+#   placeholders: {minutes}
+# status_llm: "🧠 Last LLM review {minutes} min ago"
+
+# ---- Analyst (/status follow-up) ----
+# analyst_thinking: "🧠 Analyst thinking…"
+# analyst_busy: "🧠 Analyst is already on it…"
+# analyst_skipped: "🧠 Analyst skipped — incident triage has the LLM right now. Try again shortly."
+#   placeholders: {secs} {text}
+# analyst_reply: "🧠 Analyst ({secs}s):\n{text}"
+#   placeholders: {secs}
+# analyst_failed: "🧠 Analyst gave up after {secs}s (LLM busy or slow) — overview above is current."

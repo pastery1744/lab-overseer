@@ -6,11 +6,11 @@ from . import brain, policy, actions
 from .collectors import Switch, snapshot
 from .hypervisors import make_hypervisor
 from .notifiers import make_notifier
+from .messages import Messages
 from .state import State
 
 urllib3.disable_warnings()
 log = logging.getLogger("overseer")
-ICON = {0: "·", 1: "🟡", 2: "🟠", 3: "🔴", 4: "🚨"}
 
 
 def normalize_cfg(cfg):
@@ -42,7 +42,8 @@ class Engine:
         self.state = State(cfg["db_path"])
         self.pve = make_hypervisor(cfg)
         self.switch = Switch(cfg["switch"]) if (cfg.get("switch") or {}).get("host") else None
-        brain.set_lab(cfg.get("lab_description"))
+        self.M = Messages(cfg.get("messages_path", "/etc/overseer/messages.yaml"))
+        brain.set_lab(cfg.get("lab_description"), self.M.ai_style)
         self.backend = brain.make_backend(cfg["llm"])
         self.wa = make_notifier(cfg, self.state)
         self.grace = cfg.get("grace_minutes", 5) * 60
@@ -67,77 +68,78 @@ class Engine:
                 self.wa.send(self.status_text())
                 return self._start_brief()
             if verb in (None, "HELP"):
-                return self.wa.send("Commands: /status · /auto · /watch · /go <id> · /stop <id>")
+                return self.wa.send(self.M("help"))
             if verb in ("WATCH", "AUTO"):
                 self.state.meta_set("dry_run", int(verb == "WATCH"))
-                return self.wa.send("🤖 AUTO — fixes you approve with Go will actually run" if not self.dry_run else "👀 WATCH — alerts only; Go just simulates")
+                return self.wa.send(self.M("mode_watch" if self.dry_run else "mode_auto"))
             inc = self.state.get(iid) if iid else None
             if not inc or inc["status"] not in ("scheduled", "pending_approval"):
-                return self.wa.send(f"No pending action {iid or ''}".strip())
+                return self.wa.send(self.M("no_pending", id=iid or "").strip())
             if verb == "STOP":
                 self.state.set_status(inc["id"], "cancelled", "owner said stop")
-                return self.wa.send(f"✋ {inc['id']} cancelled. Still watching {inc['target']}.")
+                return self.wa.send(self.M("cancelled", id=inc["id"], target=inc["target"]))
             if verb == "GO":
                 self._run(inc)
 
     def status_text(self):
         """Instant overview from the last snapshot — no LLM involved."""
         s, opens = self.last_snap, self.state.open_incidents()
-        L = [f"👁 Overseer · {'WATCH' if self.dry_run else 'AUTO'} · {self.backend.name()}"]
+        M = self.M
+        L = [M("status_header", mode="WATCH" if self.dry_run else "AUTO", ai=self.backend.name())]
         if not s:
-            return L[0] + "\nNo snapshot yet — first sweep still running."
+            return L[0] + "\n" + M("status_no_data")
         age = int(time.time() - s["ts"])
         checks = s["checks"]
         bad = [c for c in checks if not c["ok"]]
-        L.append(f"{'🟢' if not bad else '🔴'} {len(checks) - len(bad)}/{len(checks)} checks OK · {age}s ago")
+        L.append(M("status_checks", dot="🟢" if not bad else "🔴", ok=len(checks) - len(bad), total=len(checks), age=age))
         n = s.get("facts", {}).get("node")
         nodes = s.get("facts", {}).get("nodes") or []
         if n:
-            L.append(f"🖥 {n.get('name', 'host')}: CPU {n['cpu_pct']}% · RAM {n['mem_pct']}% · up {n['uptime_h'] / 24:.1f}d")
+            L.append(M("status_host", name=n.get("name", "host"), cpu=n["cpu_pct"], ram=n["mem_pct"], days=f"{n['uptime_h'] / 24:.1f}"))
         for nd in nodes:
-            L.append(f"   · {nd['name']}: CPU {nd['cpu_pct']}% · RAM {nd['mem_pct']}%")
+            L.append(M("status_node", name=nd["name"], cpu=nd["cpu_pct"], ram=nd["mem_pct"]))
         g = s.get("facts", {}).get("guests", {})
         if g:
             down = [f"{k} {v['name']}" for k, v in sorted(g.items()) if v["status"] != "running"]
-            L.append(f"📦 Guests: {len(g) - len(down)}/{len(g)} running" + (f" (down: {', '.join(down)})" if down else ""))
+            L.append(M("status_guests", running=len(g) - len(down), total=len(g), down=f" (down: {', '.join(down)})" if down else ""))
             top = sorted(g.values(), key=lambda v: -(v.get("cpu_pct") or 0))[:3]
-            L.append("🔥 Top CPU: " + ", ".join(f"{v['name']} {v['cpu_pct']}%" for v in top))
+            L.append(M("status_top_cpu", list=", ".join(f"{v['name']} {v['cpu_pct']}%" for v in top)))
             topm = sorted(g.values(), key=lambda v: -(v.get("mem_pct") or 0))[:3]
-            L.append("🧮 Top RAM: " + ", ".join(f"{v['name']} {min(v['mem_pct'], 100):g}%" for v in topm if v.get("mem_pct") is not None))
+            L.append(M("status_top_ram", list=", ".join(f"{v['name']} {min(v['mem_pct'], 100):g}%" for v in topm if v.get("mem_pct") is not None)))
         stor = [c["detail"].replace(" used", "") for c in checks if c["name"].startswith("storage-")]
         if stor:
-            L.append(f"💾 {' · '.join(stor)}")
+            L.append(M("status_storage", list=" · ".join(stor)))
         lag = [c for c in checks if c["name"].startswith("sw-")]
         if lag:
-            L.append(f"🔌 Switch: {sum(c['ok'] for c in lag)}/{len(lag)} watched ports healthy")
+            L.append(M("status_switch", ok=sum(c["ok"] for c in lag), total=len(lag)))
         wan = [c["detail"].split("/")[-3] if "rtt" in c["detail"] else "down" for c in checks if c["name"].startswith("wan-")]
         if wan:
-            L.append(f"🌐 WAN ping: {' / '.join(w + 'ms' if w != 'down' else w for w in wan)}")
+            L.append(M("status_wan", list=" / ".join(w + "ms" if w != "down" else w for w in wan)))
         for c in bad:
-            L.append(f"  ✗ {c['name']}: {c['detail'][:80]}")
+            L.append(M("status_failing", name=c["name"], detail=c["detail"][:80]))
         day = self.state.recent()
-        L.append(f"🧾 {len(opens)} open · {len(day)} in last 24h" if (opens or day) else "🧾 No incidents in last 24h")
+        L.append(M("status_incidents", open=len(opens), day=len(day)) if (opens or day) else M("status_no_incidents"))
         for i in opens:
-            L.append(f"  {ICON[i['tier']]} {i['id']} {i['target']}: {i['summary']} [{i['status']}]")
-        L.append(f"🧠 Last LLM review {int((time.time() - self.last_review) / 60)} min ago")
+            L.append(M("status_incident", icon=M.icon(i["tier"]), id=i["id"], target=i["target"], summary=i["summary"], status=i["status"]))
+        L.append(M("status_llm", minutes=int((time.time() - self.last_review) / 60)))
         return "\n".join(L)
 
     def _start_brief(self):
         if not self.last_snap:
             return
         if not self.briefing.acquire(blocking=False):
-            return self.wa.send("🧠 Analyst is already on it…")
-        self.wa.send("🧠 Analyst thinking…")
+            return self.wa.send(self.M("analyst_busy"))
+        self.wa.send(self.M("analyst_thinking"))
         def run():
             try:
                 hist = list(self.history)[::10][-6:]  # ~every 10 min, max 6 points
                 if not self.llm.acquire(timeout=240):
-                    return self.wa.send("🧠 Analyst skipped — incident triage has the LLM right now. Try again shortly.")
+                    return self.wa.send(self.M("analyst_skipped"))
                 try:
                     text, secs = brain.brief(self.backend, self.last_snap, hist, self.state.recent())
                 finally:
                     self.llm.release()
-                self.wa.send(f"🧠 Analyst ({secs}s):\n{text}" if text else f"🧠 Analyst gave up after {secs}s (LLM busy or slow) — overview above is current.")
+                self.wa.send(self.M("analyst_reply", secs=secs, text=text) if text else self.M("analyst_failed", secs=secs))
             finally:
                 self.briefing.release()
         threading.Thread(target=run, daemon=True).start()
@@ -148,7 +150,8 @@ class Engine:
         ok, detail = actions.execute(inc["action"], inc["action_arg"], inc["target"], t, self.pve, self.dry_run)
         self.state.log_action(inc["id"], inc["target"], inc["action"], inc["action_arg"], self.dry_run, ok, detail)
         self.state.set_status(inc["id"], "executed" if ok else "failed", detail)
-        self.wa.send(f"{'✅' if ok else '❌'} {inc['id']} {inc['action']} {inc['action_arg']} on {inc['target']}: {detail}")
+        self.wa.send(self.M("action_ok" if ok else "action_failed", id=inc["id"], target=inc["target"], detail=detail,
+                           action=f"{inc['action']} {inc['action_arg']}".strip()))
 
     def handle(self, proposal):
         checks = sorted(proposal.get("checks") or [])
@@ -165,19 +168,18 @@ class Engine:
         iid = self.state.create(fp, proposal.get("target"), d.tier, summary, d.action, d.action_arg, d.mode, status,
                                 time.time() + self.grace if d.mode == "grace" else None)
         act = f"{d.action} {d.action_arg}".strip()
-        msg = f"{ICON[d.tier]} T{d.tier} [{iid}] {proposal.get('target')}: {summary}"
+        M = self.M
+        msg = M("alert", icon=M.icon(d.tier), tier=d.tier, id=iid, target=proposal.get("target"), summary=summary)
         if proposal.get("reasoning"):
-            msg += f"\nWhy: {proposal['reasoning'][:200]}"
+            msg += "\n" + M("alert_why", reason=proposal["reasoning"][:200])
         if d.reason:
-            msg += f"\nPolicy: {d.reason}"
-        if d.mode == "grace":
-            msg += "\nTap Go to run."
-        elif d.mode == "approve":
-            msg += f"\nProposed: {act}. Tap Go / Stop."
+            msg += "\n" + M("alert_policy", policy=d.reason)
+        if d.mode in ("grace", "approve"):
+            msg += "\n" + M("alert_ask_go", action=act)
         elif d.mode == "notify_only":
-            msg += "\nNot touching this. Your call."
+            msg += "\n" + M("alert_hands_off")
         if self.dry_run and d.action != "none":
-            msg += " (watch mode — won't run)"
+            msg += M("alert_watch_note")
         self.wa.send(msg, incident_id=iid, mode=d.mode)
 
     def tick(self):
@@ -195,7 +197,7 @@ class Engine:
                 inc_checks = set(filter(None, inc["fingerprint"].split("|", 1)[1].split(",")))
                 if inc_checks and not (inc_checks & failing):
                     self.state.set_status(inc["id"], "resolved")
-                    self.wa.send(f"✅ {inc['id']} {inc['target']} recovered.")
+                    self.wa.send(self.M("recovered", id=inc["id"], target=inc["target"]))
             review_due = time.time() - self.last_review > self.cfg.get("review_interval_minutes", 60) * 60
             new = failing - self.last_failing
             self.last_failing = failing
@@ -222,7 +224,7 @@ class Engine:
                 pass
 
     def loop(self):
-        self.wa.send(f"👁 Overseer online ({self.backend.name()}, {'WATCH' if self.dry_run else 'AUTO'}).")
+        self.wa.send(self.M("online", ai=self.backend.name(), mode="WATCH" if self.dry_run else "AUTO"))
         while True:
             try:
                 self.tick()

@@ -83,6 +83,7 @@ Log into the overseer machine and type **`overseer`**. On Proxmox, get there wit
 - **Send a test alert** to your phone
 - **Show what it watches** and what it's allowed to do
 - **Let it restart a service** on another machine (walks you through it)
+- **Change what the bot says:** its messages, and the AI's tone
 - **View logs**, **restart** it, **re-run setup**, or **edit the config file**
 
 ### From your phone
@@ -137,6 +138,22 @@ sudo /opt/overseer/tools/add-service-target.sh pi@192.168.1.53 pihole-FTL pihole
 ```
 
 You type that machine's password once. The script creates an `overseer` user there that can **only** restart those services, tests it, updates your config and restarts the overseer.
+
+---
+
+## Changing what the bot says
+
+Every message the bot sends lives in **`/etc/overseer/messages.yaml`**: alerts, `/status`, command replies and icons. The easy way to edit it is the `overseer` menu → *Change what the bot says*.
+
+Everything in the file starts commented out, so you get the built-in wording. To change a message, delete the `# ` in front of it and edit the text:
+```yaml
+recovered: "🎉 {target} is back up! ({id})"
+alert_ask_go: "Want me to {action}?"
+icons: {3: "🔥", 4: "☠️"}
+```
+- Words in `{curly braces}` are filled in automatically. The file lists which ones each message can use. A misspelled one just shows up as-is and won't break anything.
+- **`ai_style`** changes how the AI talks, e.g. `ai_style: "Be casual and a bit sarcastic."` or `"Reply in Spanish."` It affects tone only. It can't change the safety rules or the alert format.
+- Updates never overwrite this file. If you break its formatting, the bot ignores it and uses the defaults (the menu warns you).
 
 ---
 
@@ -249,6 +266,7 @@ One overseer watches one lab. For a second site, install a second overseer.
 | `setup.py` | The setup wizard |
 | `tools/overseer-menu.py` | The `overseer` control menu |
 | `config.example.yaml` | Every setting, explained |
+| `messages.example.yaml` | Every message the bot sends, ready to customize |
 | `tools/add-service-target.sh` | Allow restarting a service on another machine |
 | `overseer/` | The app itself (`policy.py` holds the safety rules) |
 | `tests/` | Automated tests: `python -m pytest tests` |

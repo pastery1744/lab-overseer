@@ -42,7 +42,8 @@ if [ "$WIZARD" = 1 ]; then
   if [ -f /etc/overseer/config.yaml ]; then echo "Existing config found — keeping it (change it later with: overseer)"; else /opt/overseer/venv/bin/python /opt/overseer/setup.py --out-dir /etc/overseer; fi
 fi
 [ -f /etc/overseer/config.yaml ] || { echo "No /etc/overseer/config.yaml — run: python3 /opt/overseer/setup.py"; exit 1; }
-chown overseer /etc/overseer/config.yaml /etc/overseer/secrets.env 2>/dev/null || true
+[ -f /etc/overseer/messages.yaml ] || cp /opt/overseer/messages.example.yaml /etc/overseer/messages.yaml
+chown overseer /etc/overseer/config.yaml /etc/overseer/secrets.env /etc/overseer/messages.yaml 2>/dev/null || true
 chmod 600 /etc/overseer/secrets.env 2>/dev/null || true
 
 # Ollama: install when the config wants a local one
