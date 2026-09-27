@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Lab Overseer — one-line installer.
 #
-#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/pastery1744/lab-overseer/primary/get.sh)"
+#   bash -c "$(curl -fsSL https://raw.githubusercontent.com/pastery1744/lab-overseer/main/get.sh)"
 #
 # On a Proxmox host  → builds a container and installs everything (deploy-proxmox.sh)
 # On Debian/Ubuntu   → installs right here (install.sh)
-# Options (env vars): OVERSEER_REF=v1.2.0 (tag/branch, default primary)   OVERSEER_REPO=owner/repo
+# Options (env vars): OVERSEER_REF=v1.2.0 (tag/branch, default main)   OVERSEER_REPO=owner/repo
 set -euo pipefail
 REPO="${OVERSEER_REPO:-pastery1744/lab-overseer}"
-REF="${OVERSEER_REF:-primary}"
+REF="${OVERSEER_REF:-main}"
 B="\033[1m"; C="\033[1;36m"; R="\033[0m"
 
 [ "$(id -u)" = 0 ] || { echo "Please run as root, e.g.:  sudo bash -c \"\$(curl -fsSL https://raw.githubusercontent.com/$REPO/$REF/get.sh)\""; exit 1; }

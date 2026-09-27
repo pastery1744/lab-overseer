@@ -16,7 +16,7 @@ When something fails, an AI reads the situation, figures out the likely cause, a
 Run this **one line** as root. It works on a Proxmox host or on any Debian/Ubuntu machine:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/pastery1744/lab-overseer/primary/get.sh)"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/pastery1744/lab-overseer/main/get.sh)"
 ```
 
 It works out where it's running and does the right thing:
