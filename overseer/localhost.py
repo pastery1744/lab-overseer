@@ -26,11 +26,20 @@ def running_services():
     return sorted(n for n in names if not n.startswith(BORING))
 
 
+_prev_stat = None
+
+
 def _cpu_pct(interval=0.5):
+    """Average CPU since the previous call (i.e. over the whole sweep). Only the very first call sleeps `interval`."""
+    global _prev_stat
     def snap():
         v = [int(x) for x in open("/proc/stat").readline().split()[1:]]
         return sum(v), v[3] + (v[4] if len(v) > 4 else 0)
-    t1, i1 = snap(); time.sleep(interval); t2, i2 = snap()
+    if _prev_stat is None:
+        _prev_stat = snap()
+        time.sleep(interval)
+    (t1, i1), (t2, i2) = _prev_stat, snap()
+    _prev_stat = (t2, i2)
     return round(100 * (1 - (i2 - i1) / max(1, t2 - t1)), 1)
 
 
@@ -73,9 +82,11 @@ def list_containers(use_sudo=True):
     return res
 
 
-def _active(unit):
-    r = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True, timeout=10)
-    return r.stdout.strip()
+def _active(units):
+    """{unit: state} from one systemctl call (it prints one line per unit, in order; exit code is nonzero if any is down)."""
+    r = subprocess.run(["systemctl", "is-active", *units], capture_output=True, text=True, timeout=10)
+    states = r.stdout.split()
+    return {u: states[i] if i < len(states) else "unknown" for i, u in enumerate(units)}
 
 
 class LocalHost:
@@ -116,10 +127,12 @@ class LocalHost:
                     ok = bool(c) and c["state"] == "running" and c["health"] != "unhealthy"
                     detail = f"{name} " + (c["status"] if c else "missing (removed or renamed?)")
                     checks.append({"name": f"ctr-{name}", "target": self.cfg.get("container_targets", {}).get(name, name), "ok": ok, "detail": detail[:120]})
-        for svc in self.cfg.get("services", []):
-            try:
-                state = _active(svc)
-            except Exception as e:
-                state = f"error {e}"
+        services = self.cfg.get("services", [])
+        try:
+            states = _active(services) if services else {}
+        except Exception as e:
+            states = {s: f"error {e}" for s in services}
+        for svc in services:
+            state = states[svc]
             checks.append({"name": f"svc-{svc}", "target": svc, "ok": state == "active", "detail": f"{svc} {state}"})
         return checks, facts

@@ -5,10 +5,12 @@ lab_description: "a homelab"   # one line, fed to the LLM, e.g. "a Proxmox homel
 dry_run: true                  # WATCH mode: approved fixes are only simulated. Toggle live with /auto and /watch
 interval_seconds: 60
 confirm_sweeps: 2              # a check must fail this many sweeps in a row before it counts (filters blips)
-review_interval_minutes: 60    # full LLM review even when everything is green
+review_interval_minutes: 60    # re-review still-failing checks this often (an all-green lab never calls the LLM)
 max_actions_per_hour: 2        # per target; more than this = flapping, escalates to tier 3
 db_path: /var/lib/overseer/overseer.db
 decision_log: /var/lib/overseer/decisions.jsonl
+decision_log_max_mb: 20        # rotated to decisions.jsonl.1 past this size
+history_days: 90               # closed incidents / action log older than this are pruned
 heartbeat_url: ""              # optional dead-man switch, e.g. a healthchecks.io ping URL
 
 llm:

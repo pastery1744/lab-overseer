@@ -221,15 +221,15 @@ def test_esxi_collect_with_fake_vsphere(monkeypatch):
     """Exercise the ESXi backend against fake pyVmomi objects."""
     from types import SimpleNamespace as N
     from overseer.hypervisors.esxi import ESXi
-    vm = N(_moId="vm-1", name="router", runtime=N(powerState="poweredOn"),
-           summary=N(config=N(memorySizeMB=1024), runtime=N(powerState="poweredOn", maxCpuUsage=2000),
-                     quickStats=N(overallCpuUsage=500, guestMemoryUsage=512)),
-           guest=N(toolsRunningStatus="guestToolsRunning"), RebootGuest=lambda: None)
-    ds = N(name="datastore1", summary=N(capacity=100, freeSpace=10))
-    host = N(name="esx1", datastore=[ds], summary=N(quickStats=N(overallCpuUsage=1000, overallMemoryUsage=4096, uptime=7200),
-                                                     hardware=N(cpuMhz=2000, numCpuCores=4, memorySize=16 * 1024 ** 3)))
+    # rows shaped like ESXi._retrieve() output: property path -> value, plus the managed object
+    vm = N(_moId="vm-1", name="router", guest=N(toolsRunningStatus="guestToolsRunning"), RebootGuest=lambda: None)
+    vm_row = {"_obj": vm, "name": "router", "summary.config.memorySizeMB": 1024, "summary.runtime.powerState": "poweredOn",
+              "summary.runtime.maxCpuUsage": 2000, "summary.quickStats.overallCpuUsage": 500, "summary.quickStats.guestMemoryUsage": 512}
+    host = {"name": "esx1", "summary.quickStats": N(overallCpuUsage=1000, overallMemoryUsage=4096, uptime=7200),
+            "summary.hardware": N(cpuMhz=2000, numCpuCores=4, memorySize=16 * 1024 ** 3)}
     e = ESXi.__new__(ESXi); e.cfg = {}; e.si = None
-    monkeypatch.setattr(e, "_vms", lambda: [vm]); monkeypatch.setattr(e, "_hosts", lambda: [host])
+    monkeypatch.setattr(e, "_vm_rows", lambda probe=False: [vm_row]); monkeypatch.setattr(e, "_host_rows", lambda: [host])
+    monkeypatch.setattr(e, "_ds_rows", lambda: [{"name": "datastore1", "summary.capacity": 100, "summary.freeSpace": 10}])
     checks, facts = e.collect({"router": {"kind": "vm", "vmname": "router"}})
     byname = {c["name"]: c for c in checks}
     assert facts["node"]["cpu_pct"] == 12.5 and facts["guests"]["vm-1"]["cpu_pct"] == 25.0
@@ -342,14 +342,14 @@ def test_proxmox_cluster(monkeypatch):
 def test_esxi_multi_host(monkeypatch):
     from types import SimpleNamespace as N
     from overseer.hypervisors.esxi import ESXi
-    ds = N(name="shared-nfs", summary=N(capacity=100, freeSpace=50))
     def host(name, cpu, state="connected"):
-        return N(name=name, datastore=[ds], runtime=N(connectionState=state),
-                 summary=N(quickStats=N(overallCpuUsage=cpu, overallMemoryUsage=1024, uptime=3600),
-                           hardware=N(cpuMhz=1000, numCpuCores=4, memorySize=8 * 1024 ** 3)))
+        return {"name": name, "runtime.connectionState": state,
+                "summary.quickStats": N(overallCpuUsage=cpu, overallMemoryUsage=1024, uptime=3600),
+                "summary.hardware": N(cpuMhz=1000, numCpuCores=4, memorySize=8 * 1024 ** 3)}
     e = ESXi.__new__(ESXi); e.cfg = {}; e.si = None
-    monkeypatch.setattr(e, "_vms", lambda: [])
-    monkeypatch.setattr(e, "_hosts", lambda: [host("esx1", 1000), host("esx2", 3000), host("esx3", 0, "disconnected")])
+    monkeypatch.setattr(e, "_vm_rows", lambda probe=False: [])
+    monkeypatch.setattr(e, "_ds_rows", lambda: [{"name": "shared-nfs", "summary.capacity": 100, "summary.freeSpace": 50}])
+    monkeypatch.setattr(e, "_host_rows", lambda: [host("esx1", 1000), host("esx2", 3000), host("esx3", 0, "disconnected")])
     checks, facts = e.collect({})
     by = {c["name"]: c for c in checks}
     assert facts["node"]["name"] == "2 ESXi hosts" and facts["node"]["cpu_pct"] == 50.0
@@ -453,7 +453,7 @@ def test_this_server_mode(tmp_path, monkeypatch):
     # collector
     monkeypatch.setattr(LH, "_cpu_pct", lambda interval=0.5: 12.5)
     monkeypatch.setattr(LH, "_mem_pct", lambda: 95.0)
-    monkeypatch.setattr(LH, "_active", lambda u: "active" if u != "nginx" else "failed")
+    monkeypatch.setattr(LH, "_active", lambda us: {u: "active" if u != "nginx" else "failed" for u in us})
     checks, facts = LH.LocalHost(cfg["local"]).collect()
     by = {c["name"]: c for c in checks}
     assert facts["node"]["cpu_pct"] == 12.5 and not by["local-mem"]["ok"] and by["storage-root"]["ok"] is not None
@@ -610,3 +610,70 @@ def test_ai_incident_without_evidence_is_discarded(tmp_path, monkeypatch):
     eng.last_failing = set(); eng.tick()
     targets = [i["target"] for i in eng.state.open_incidents()]
     assert targets == ["pihole"] and not any("pfSense" in s for s in sent)
+
+
+def test_critical_target_goes_straight_to_strong_model(tmp_path, monkeypatch):
+    """Failing floor_tier>=escalate_at_tier infra: one call on the strong model, not cheap-then-strong."""
+    eng, sent, snap = make_engine(tmp_path, monkeypatch, [], [])
+    calls = []
+    eng.backend.triage = lambda prompt, escalate=False: (calls.append(escalate), {"incidents": []})[1]
+    snap["checks"] = [{"name": "pihole-dns", "target": "pihole", "ok": False, "detail": "x"}]
+    eng.tick()
+    snap["checks"] = [{"name": "pfsense-ping", "target": "pfsense", "ok": False, "detail": "x"}]   # floor_tier 3
+    eng.tick()
+    assert calls == [False, True]
+
+
+def test_background_triage_keeps_sweeping_and_uses_fresh_evidence(tmp_path, monkeypatch):
+    import threading
+    eng, sent, snap = make_engine(tmp_path, monkeypatch, [], [])
+    eng.background = True
+    snap["checks"] = [{"name": "pihole-dns", "target": "pihole", "ok": False, "detail": "x"}]
+    go, started = threading.Event(), threading.Event()
+    def slow(prompt, escalate=False):
+        started.set(); go.wait(5)
+        return {"incidents": [P()]}
+    eng.backend.triage = slow
+    eng.tick(); started.wait(5)
+    snap["checks"] = []
+    eng.tick()                              # model still thinking: this sweep must not block
+    go.set()
+    for _ in range(50):
+        if not eng.llm.locked():
+            break
+        time.sleep(0.05)
+    time.sleep(0.05)
+    assert not eng.state.open_incidents()   # check recovered meanwhile -> AI incident discarded
+
+
+def test_busy_llm_defers_new_failures(tmp_path, monkeypatch):
+    eng, sent, snap = make_engine(tmp_path, monkeypatch, [P()], ["pihole-dns"])
+    eng.llm.acquire()                       # e.g. the /status analyst holds the model
+    eng.tick()
+    assert not eng.state.open_incidents() and eng.last_failing == set()
+    eng.llm.release()
+    eng.tick()                              # still new -> triaged now
+    assert len(eng.state.open_incidents()) == 1
+
+
+def test_systemctl_batched(monkeypatch):
+    import subprocess as sp
+    from overseer import localhost as LH
+    calls = []
+    monkeypatch.setattr(LH.subprocess, "run", lambda cmd, **k: (calls.append(cmd), sp.CompletedProcess(cmd, 3, "active\nfailed\n", ""))[1])
+    assert LH._active(["nginx", "redis"]) == {"nginx": "active", "redis": "failed"}
+    assert len(calls) == 1
+
+
+def test_decision_log_rotates_and_db_prunes(tmp_path):
+    from overseer.state import State
+    p = str(tmp_path / "d.jsonl")
+    open(p, "w").write("x" * 2_000_000)
+    brain._append_log(p, {"a": 1}, max_mb=1)
+    assert (tmp_path / "d.jsonl.1").exists() and open(p).read() == '{"a": 1}\n'
+    st = State(str(tmp_path / "s.db"))
+    old = st.create("f", "t", 1, "s", "none", "", "notify", "resolved")
+    keep = st.create("g", "t", 1, "s", "none", "", "notify", "open")
+    st._q("UPDATE incidents SET updated=0")
+    st.prune(90)
+    assert st.get(old) is None and st.get(keep)

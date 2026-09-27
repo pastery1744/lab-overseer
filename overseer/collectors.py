@@ -1,5 +1,6 @@
 """Gathers a snapshot of the lab. Every check returns {name, target, ok, detail}."""
 import socket, subprocess, time, logging
+from concurrent.futures import ThreadPoolExecutor
 import requests
 
 log = logging.getLogger("collect")
@@ -58,7 +59,6 @@ def _one(c):
 
 def run_checks(checks, workers=32):
     """All checks run in parallel, so 200 dead hosts take ~5s, not 15 minutes. Output keeps config order."""
-    from concurrent.futures import ThreadPoolExecutor
     active = [c for c in checks if not c.get("disabled")]
     if not active:
         return []
@@ -87,7 +87,8 @@ class Switch:
     def collect(self):
         checks = []
         try:
-            names, oper, speed, err = (self._walk(o) for o in (self.IFNAME, self.OPER, self.SPEED, self.INERR))
+            with ThreadPoolExecutor(max_workers=4) as ex:   # 4 independent walks, run side by side
+                names, oper, speed, err = ex.map(self._walk, (self.IFNAME, self.OPER, self.SPEED, self.INERR))
             by_name = {v: k for k, v in names.items()}
             ignore = set(self.cfg.get("ignore_ports", []))
             for port, spec in self.cfg.get("watch_ports", {}).items():
@@ -114,17 +115,22 @@ class Switch:
 
 def snapshot(cfg, hv, switch, local=None):
     t0 = time.time()
-    checks = run_checks(cfg.get("checks", []))
-    facts = {}
-    if hv:
-        c, facts = hv.collect(cfg.get("targets", {}))
+    # every source runs concurrently; the sweep takes as long as the slowest one, not the sum
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        f_checks = ex.submit(run_checks, cfg.get("checks", []))
+        f_hv = ex.submit(hv.collect, cfg.get("targets", {})) if hv else None
+        f_local = ex.submit(local.collect) if local else None
+        f_sw = ex.submit(switch.collect) if switch else None
+    checks, facts = f_checks.result(), {}
+    if f_hv:
+        c, facts = f_hv.result()
         checks += c
-    if local:
-        c, lf = local.collect()
+    if f_local:
+        c, lf = f_local.result()
         checks += c
         facts.setdefault("node", lf.get("node"))
         if lf.get("containers"):
             facts["containers"] = lf["containers"]
-    if switch:
-        checks += switch.collect()
+    if f_sw:
+        checks += f_sw.result()
     return {"ts": int(t0), "took_s": round(time.time() - t0, 1), "checks": checks, "facts": facts}

@@ -202,13 +202,24 @@ def fallback(snap):
                           for t, cs in by_t.items()]}
 
 
-def triage(backend, snap, targets, open_incidents, decision_log, escalate_at_tier=2):
+def _append_log(path, rec, max_mb):
+    try:
+        if max_mb and os.path.getsize(path) > max_mb * 1048576:
+            os.replace(path, path + ".1")  # keep one old generation
+    except OSError:
+        pass
+    with open(path, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+
+def triage(backend, snap, targets, open_incidents, decision_log, escalate_at_tier=2, serious=False, log_max_mb=20):
+    """serious=True (critical infra failing) sends Claude straight to the stronger model — one call, not two."""
     prompt = build_prompt(snap, targets, open_incidents)
     t0 = time.time()
     try:
-        out = backend.triage(prompt)
-        # Claude: re-run anything serious on the stronger model
-        if isinstance(backend, Claude) and any(i.get("tier", 0) >= escalate_at_tier for i in out.get("incidents", [])):
+        out = backend.triage(prompt, escalate=serious)
+        # safety net: the cheap model found something serious we didn't foresee -> re-check on the stronger model
+        if not serious and isinstance(backend, Claude) and any(i.get("tier", 0) >= escalate_at_tier for i in out.get("incidents", [])):
             out = backend.triage(prompt, escalate=True)
         err = None
     except Exception as e:
@@ -217,8 +228,7 @@ def triage(backend, snap, targets, open_incidents, decision_log, escalate_at_tie
     rec = {"ts": snap["ts"], "backend": backend.name(), "latency_s": round(time.time() - t0, 1),
            "error": err, "prompt": prompt, "output": out}
     try:
-        with open(decision_log, "a") as f:
-            f.write(json.dumps(rec) + "\n")
+        _append_log(decision_log, rec, log_max_mb)
     except OSError as e:
         log.warning("decision log write failed: %s", e)
     return out.get("incidents", [])

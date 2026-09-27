@@ -63,6 +63,12 @@ class State:
     def recent_actions(self, target, window=3600):
         return self._q("SELECT COUNT(*) c FROM actions_log WHERE target=? AND ts>?", (target, time.time() - window))[0]["c"]
 
+    def prune(self, days=90):
+        """Drop closed incidents and action logs older than `days` so the DB doesn't grow forever."""
+        cut = time.time() - days * 86400
+        self._q(f"DELETE FROM incidents WHERE updated<? AND status NOT IN {OPEN}", (cut,))
+        self._q("DELETE FROM actions_log WHERE ts<?", (cut,))
+
     def meta_get(self, k, default=None):
         r = self._q("SELECT v FROM meta WHERE k=?", (k,))
         return r[0]["v"] if r else default

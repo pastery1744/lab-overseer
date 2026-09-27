@@ -59,6 +59,9 @@ class Engine:
         self.briefing = threading.Lock()
         self.llm = threading.Lock()   # one LLM job at a time — CPU inference can't share cores
         self.last_review = time.time()  # first full review after an interval, not at boot
+        self.confirmed = set()           # latest confirmed-failing checks (read by background triage)
+        self.background = False          # loop() turns this on; tests call tick() synchronously
+        self.last_prune = 0
 
     @property
     def dry_run(self):
@@ -198,6 +201,28 @@ class Engine:
             msg += M("alert_watch_note")
         self.wa.send(msg, incident_id=iid, mode=d.mode)
 
+    def _escalate_at(self):
+        return self.cfg["llm"].get("claude", {}).get("escalate_at_tier", 2)
+
+    def _serious(self, snap, confirmed):
+        """Failing critical infra (floor_tier >= escalate_at_tier) goes straight to the strong model."""
+        hit = {c["target"] for c in snap["checks"] if c["name"] in confirmed}
+        return any(int(self.targets.get(t, {}).get("floor_tier", 0)) >= self._escalate_at() for t in hit)
+
+    def _triage(self, snap, open_now, serious):
+        """Caller holds self.llm; released here."""
+        try:
+            props = brain.triage(self.backend, snap, self.targets, open_now, self.cfg["decision_log"],
+                                 self._escalate_at(), serious=serious, log_max_mb=self.cfg.get("decision_log_max_mb", 20))
+        except Exception:
+            log.exception("triage failed")
+            props = []
+        finally:
+            self.llm.release()
+        with self.lock:
+            for p in props:
+                self.handle(p, self.confirmed)  # current evidence — drops anything that recovered while the model thought
+
     def tick(self):
         snap = snapshot(self.cfg, self.pve, self.switch, self.local)
         self.last_snap = snap
@@ -222,22 +247,26 @@ class Engine:
                     self.state.set_status(inc["id"], "resolved")
                     self.wa.send(self.M("recovered", id=inc["id"], target=inc["target"]))
             review_due = time.time() - self.last_review > self.cfg.get("review_interval_minutes", 60) * 60
+            self.confirmed = confirmed
             new = confirmed - self.last_failing
-            self.last_failing = confirmed
+            # the AI is only consulted when something is really failing; an all-green lab has nothing to triage
+            launch = bool(new or (review_due and confirmed)) and self.llm.acquire(blocking=False)
+            # if triage is still busy, keep untriaged failures "new" so the next free sweep picks them up
+            self.last_failing = confirmed if launch else self.last_failing & confirmed
             open_now = self.state.open_incidents()
-        # LLM runs OUTSIDE the lock — CPU inference takes minutes and must not block Telegram commands
-        props = []
-        # the AI is only consulted when something is really failing; an all-green lab has nothing to triage
-        if new or (review_due and confirmed):
+        if launch:
             self.last_review = time.time()
-            with self.llm:
-                props = brain.triage(self.backend, snap, self.targets, open_now,
-                                     self.cfg["decision_log"], self.cfg["llm"].get("claude", {}).get("escalate_at_tier", 2))
+            args = (snap, open_now, self._serious(snap, confirmed))
+            if self.background:  # CPU inference takes minutes — sweeps, recoveries and heartbeats must keep going
+                threading.Thread(target=self._triage, args=args, daemon=True).start()
+            else:
+                self._triage(*args)
         with self.lock:
-            for p in props:
-                self.handle(p, confirmed)
             for inc in self.state.due():
                 self._run(inc)
+        if time.time() - self.last_prune > 86400:
+            self.state.prune(self.cfg.get("history_days", 90))
+            self.last_prune = time.time()
         log.info("tick: %d checks, %d failing, took %ss", len(snap["checks"]), len(failing), snap["took_s"])
         hb = self.cfg.get("heartbeat_url")
         if hb:  # dead-man switch: if the lab/WAN dies, the external service alerts you instead
@@ -249,12 +278,19 @@ class Engine:
 
     def loop(self):
         self.wa.send(self.M("online", ai=self.backend.name(), mode="WATCH" if self.dry_run else "AUTO"))
+        self.background = True
+        period = self.cfg.get("interval_seconds", 60)
+        nxt = time.monotonic()
         while True:
             try:
                 self.tick()
             except Exception:
                 log.exception("tick failed")
-            time.sleep(self.cfg.get("interval_seconds", 60))
+            nxt += period  # fixed cadence: sweep duration doesn't stretch the interval
+            now = time.monotonic()
+            if nxt < now:
+                nxt = now  # overran: sweep again right away, don't try to catch up
+            time.sleep(nxt - now)
 
 
 def main():

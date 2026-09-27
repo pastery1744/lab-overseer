@@ -2,7 +2,7 @@
 
   python -m overseer.replay -c config.yaml --backend claude --last 50
 """
-import argparse, json, time
+import argparse, collections, json, time
 import yaml
 from . import brain
 
@@ -16,7 +16,8 @@ def main():
     cfg = yaml.safe_load(open(a.config))
     llm = dict(cfg["llm"], backend=a.backend)
     b = brain.make_backend(llm)
-    recs = [json.loads(l) for l in open(cfg["decision_log"])][-a.last:]
+    with open(cfg["decision_log"]) as f:
+        recs = [json.loads(l) for l in collections.deque(f, maxlen=a.last)]  # only parse the tail
     for r in recs:
         if not json.loads(r["prompt"])["failing_checks"]:
             continue  # all-green reviews aren't interesting to compare
