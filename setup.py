@@ -303,38 +303,70 @@ def setup_telegram(sec):
 
 
 def setup_discord(sec):
+    API = "https://discord.com/api/v10"
     UI.msg("Let's make your Discord bot:\n\n"
-           "1. Go to  discord.com/developers/applications\n"
-           "2. New Application → any name → Create\n"
+           "1. Open  discord.com/developers/applications\n"
+           "2. New Application → give it any name → Create\n"
            "3. Left menu: Bot → Reset Token → Copy\n\n"
-           "Paste that token next.", "Discord bot")
+           "You'll paste that token next.", "Discord bot")
     hdr = lambda t: {"Authorization": f"Bot {t}", "User-Agent": "LabOverseer (setup, 1)"}
     while True:
         tok = UI.ask("Paste the bot token", secret=True).strip()
-        code, j = http("GET", "https://discord.com/api/v10/users/@me", hdr(tok))
+        code, me = http("GET", f"{API}/users/@me", hdr(tok))
         if code == 200:
             break
-        warn("Discord didn't accept that token. Try copying it again (Reset Token makes a new one).")
+        warn("Discord didn't accept that token. Copy it again (Reset Token makes a new one).")
     sec["DISCORD_TOKEN"] = tok
-    invite = f"https://discord.com/oauth2/authorize?client_id={j['id']}&scope=bot+applications.commands&permissions=3072"
-    UI.msg(f"Invite the bot to your server — open this link in a browser:\n\n{invite}\n\n"
-           "Then in Discord: Settings → Advanced → turn ON Developer Mode.\n"
-           "That lets you right-click things and 'Copy ID'.", "Invite the bot")
-    ids = r"\d{15,21}"
+    H = hdr(tok)
+
+    def guilds():
+        c, g = http("GET", f"{API}/users/@me/guilds", H)
+        return g if c == 200 and isinstance(g, list) else []
+
+    gl = guilds()
+    if not gl:
+        invite = f"https://discord.com/oauth2/authorize?client_id={me['id']}&scope=bot+applications.commands&permissions=3072"
+        UI.link("Add the bot to your server",
+                "Open this link (click it, or copy it into your browser), pick your server, and press Authorize:",
+                invite, "The bot only gets 'View Channels' + 'Send Messages'.",
+                wait=lambda: bool(guilds()))
+        gl = guilds()
+    manual = r"\d{15,21}"
+
     def get_id(q):
         while True:
             v = UI.ask(q).strip()
-            if re.fullmatch(ids, v):
+            if re.fullmatch(manual, v):
                 return v
-            warn("That doesn't look like a Discord ID (a long number). Right-click → Copy ID.")
-    guild = get_id("Server ID  (right-click your server icon → Copy Server ID)")
-    chan = get_id("Channel ID for alerts  (right-click the channel → Copy Channel ID)")
-    owner = get_id("YOUR user ID  (right-click your own name → Copy User ID)")
-    code, _ = http("POST", f"https://discord.com/api/v10/channels/{chan}/messages", hdr(tok), {"content": "👋 Lab Overseer paired. Alerts will land here."})
+            warn("That doesn't look like a Discord ID (a long number).\nIn Discord: Settings → Advanced → Developer Mode, then right-click → Copy ID.")
+
+    if not gl:
+        warn("The bot isn't in a server yet, so let's enter the IDs by hand.")
+        guild, chan, owner = get_id("Server ID"), get_id("Alert channel ID"), get_id("Your user ID")
+    else:
+        guild = gl[0]["id"] if len(gl) == 1 else UI.menu("Which server?", [(g["id"], g["name"]) for g in gl])
+        gname = next(g["name"] for g in gl if g["id"] == guild)
+        _, chans = http("GET", f"{API}/guilds/{guild}/channels", H)
+        text = sorted([c for c in (chans if isinstance(chans, list) else []) if c.get("type") == 0], key=lambda c: c.get("position", 0))
+        if text:
+            pref = next((c["id"] for c in text if re.search(r"alert|overseer|homelab|lab|monitor|server", c["name"], re.I)),
+                        next((c["id"] for c in text if c["name"] == "general"), text[0]["id"]))
+            chan = UI.menu(f"Which channel in {gname} should alerts go to?", [(c["id"], f"#{c['name']}") for c in text], pref)
+        else:
+            chan = get_id("Channel ID for alerts (the bot can't see any channels)")
+        _, gd = http("GET", f"{API}/guilds/{guild}", H)
+        owner = str(gd.get("owner_id", "")) if isinstance(gd, dict) else ""
+        oname = ""
+        if owner:
+            _, u = http("GET", f"{API}/users/{owner}", H)
+            oname = (u or {}).get("global_name") or (u or {}).get("username") or ""
+        if not (owner and UI.yes(f"Only you should be able to press Go.\n\nIs  {oname or owner}  (the owner of {gname}) you?")):
+            owner = get_id("Your Discord user ID  (Settings → Advanced → Developer Mode, then right-click your name → Copy User ID)")
+    code, _ = http("POST", f"{API}/channels/{chan}/messages", H, {"content": "👋 Lab Overseer paired. Alerts will land here."})
     if code in (200, 201):
         UI.msg("Test message sent — check the channel.", "Discord ✓")
     else:
-        warn(f"Couldn't post to that channel yet (HTTP {code}).\nMake sure you opened the invite link and the bot can see that channel.")
+        warn(f"Couldn't post in that channel (HTTP {code}).\nMake sure the bot's role can see and send messages there.")
     return {"type": "discord", "token_env": "DISCORD_TOKEN", "guild_id": guild, "channel_id": chan, "owner_id": owner}
 
 

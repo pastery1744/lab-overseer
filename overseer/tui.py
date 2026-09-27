@@ -2,7 +2,7 @@
 
 Set OVERSEER_PLAIN=1 to force plain prompts (e.g. dumb terminals, tests).
 """
-import getpass, os, shutil, subprocess, sys
+import getpass, os, shutil, subprocess, sys, time
 
 TITLE = "Lab Overseer"
 # whiptail can only draw arrows/dashes/bullets/emoji under a UTF-8 locale; installers often run with LC_ALL=C
@@ -66,6 +66,27 @@ class Plain:
     def text(self, title, body):
         print(f"\n== {title}\n{body}\n")
         input("[Enter] ")
+
+    def link(self, title, before, url, after="", wait=None):
+        """Show a URL on the plain terminal (clickable & copyable — never wrapped inside a dialog box).
+        wait(): optional poll function; returns truthy when done. Enter skips the wait."""
+        import select
+        os.system("clear") if self.gui else None
+        print(f"\n\033[1m== {title}\033[0m\n\n{before}\n\n    \033[1;4;36m{url}\033[0m\n\n{after}")
+        if wait is None:
+            input("\nPress Enter when done… ")
+            return True
+        print("\nWaiting… (press Enter to skip)", end="", flush=True)
+        while True:
+            if wait():
+                print("  ✓")
+                time.sleep(1)
+                return True
+            r, _, _ = select.select([sys.stdin], [], [], 3)
+            if r:
+                sys.stdin.readline()
+                return False
+            print(".", end="", flush=True)
 
 
 def _text_lines(q, width):

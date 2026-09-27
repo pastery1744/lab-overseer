@@ -67,7 +67,7 @@ The wizard runs automatically during install. Use arrow keys to move, **Space** 
    - **Just the network:** pings, websites and ports only.
 2. **Chat app.**
    - **Telegram:** make a bot with **@BotFather**, paste the token, then send `/start` to your bot. The wizard grabs your chat ID and locks the bot to you.
-   - **Discord:** create a bot at discord.com/developers, paste the token, and open the invite link it prints. Then turn on Developer Mode in Discord and right-click to copy your server, channel and user IDs. It sends a test message.
+   - **Discord:** create a bot at discord.com/developers and paste the token. The wizard prints an invite link you can click, then waits while you add the bot to your server. It lists your channels to pick from and confirms you're the server owner, so there are no IDs to copy. It sends a test message.
 3. **AI.** Local Ollama or Claude (it tests your key).
 4. **Checks.** It adds your gateway, DNS servers and internet pings automatically. You can add websites and `host:port` services.
 5. **Switch** (optional): IP, read-only community string, and which ports to watch.

@@ -528,3 +528,49 @@ def test_wizard_docker_step(tmp_path, monkeypatch):
     assert loc["containers"] == ["nginx", "db"] and loc["container_targets"] == {"nginx": "nginx-container"}   # name clash with the nginx service
     assert t["nginx-container"]["actions"] == ["restart_container:nginx"] and t["db"]["floor_tier"] == 3
     assert "Docker containers: nginx, db" in cfg["lab_description"]
+
+
+def test_wizard_discord_autodetect(tmp_path, monkeypatch):
+    """Discord pairing: waits for the bot to join, then picks server/channel/owner without typing any IDs."""
+    import sys, builtins, getpass, importlib
+    sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+    monkeypatch.setenv("OVERSEER_PLAIN", "1")
+    for k in ("PVE_URL", "PVE_TOKEN_ID", "PVE_TOKEN", "PVE_NODE", "OVERSEER_LLM"):
+        monkeypatch.delenv(k, raising=False)
+    import setup as S
+    importlib.reload(S)
+    state = {"guild_polls": 0, "posted": None}
+    G = "111111111111111111"
+    def fake_http(method, url, headers=None, body=None, verify=True, timeout=15):
+        if url.endswith("/users/@me"):
+            return 200, {"id": "999999999999999999", "username": "overseer-bot"}
+        if url.endswith("/users/@me/guilds"):
+            state["guild_polls"] += 1
+            return 200, ([] if state["guild_polls"] == 1 else [{"id": G, "name": "Homelab"}])   # joins after the invite
+        if url.endswith(f"/guilds/{G}/channels"):
+            return 200, [{"id": "2", "name": "general", "type": 0, "position": 0}, {"id": "3", "name": "voice", "type": 2},
+                         {"id": "4", "name": "lab-alerts", "type": 0, "position": 1}]
+        if url.endswith(f"/guilds/{G}"):
+            return 200, {"owner_id": "555555555555555555"}
+        if "/users/555555555555555555" in url:
+            return 200, {"username": "pastery"}
+        if "/messages" in url:
+            state["posted"] = url
+            return 200, {}
+        return 200, {}
+    monkeypatch.setattr(S, "http", fake_http)
+    monkeypatch.setattr(S, "default_gateway", lambda: None)
+    monkeypatch.setattr(S, "dns_servers", lambda: [])
+    answers = iter(["", "4",          # welcome; just the network
+                    "2", "",          # Discord; bot instructions
+                    "",               # channel menu: accept the suggested #lab-alerts
+                    "",               # "Is pastery you?" -> yes (default)
+                    "",               # test message sent
+                    "1", "n", "n", "n", "", ""] + [""] * 5)
+    monkeypatch.setattr(builtins, "input", lambda p="": next(answers))
+    monkeypatch.setattr(getpass, "getpass", lambda p="": "tok")
+    monkeypatch.setattr(sys, "argv", ["setup.py", "--out-dir", str(tmp_path)])
+    S.main()
+    n = yaml.safe_load(open(tmp_path / "config.yaml"))["notifier"]
+    assert n == {"type": "discord", "token_env": "DISCORD_TOKEN", "guild_id": G, "channel_id": "4", "owner_id": "555555555555555555"}
+    assert state["posted"].endswith("/channels/4/messages")
