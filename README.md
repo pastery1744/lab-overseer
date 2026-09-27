@@ -28,7 +28,7 @@ It works out where it's running and does the right thing:
 
 When it's done you'll get **"👁 Overseer online"** in your chat. Already have one installed? It notices and asks whether to **upgrade it**, **install a separate one**, or **quit**. It never changes anything without asking.
 
-**On Debian/Ubuntu** it installs right there and runs the same wizard.
+**On a Debian/Ubuntu server** (no VMs needed) it installs right there. Pick **"This server itself"** in the wizard and it watches the machine's CPU, RAM, disks and load, plus whichever services you tick (nginx, docker, databases…). It can restart those services for you, and only those.
 
 **On ESXi:** ESXi can't run containers. Create a small **Debian 12** VM, run the same line inside it, and pick **ESXi** in the wizard.
 
@@ -46,7 +46,7 @@ Pin a version with `OVERSEER_REF=v1.0.0` in front of the one-liner.
 
 ## What you'll need
 
-- **A place to run it.** The Proxmox script makes one for you. Otherwise use a Debian or Ubuntu VM.
+- **A place to run it.** The Proxmox script makes one for you. Otherwise use any Debian or Ubuntu machine, including the server you want to watch.
   - With a **local AI** (Ollama): 8+ cores, 12 GB RAM, 32 GB disk
   - With **Claude** (cloud AI): 1–2 cores, 1 GB RAM, 8 GB disk
 - **Telegram or Discord.** For Discord, a server you're an admin of.
@@ -60,17 +60,19 @@ The setup wizard walks you through the few things only you can do: creating the 
 
 The wizard runs automatically during install. Use arrow keys to move, **Space** to tick boxes and **Enter** to confirm. **Back** goes to the previous step. **Esc** pauses, so you can go back, keep going, or quit. It asks, in order:
 
-1. **Describe your lab** in one line, e.g. *"Proxmox on a Dell R730 with a pfSense router"*. This gives the AI context.
-2. **Hypervisor.** It connects and shows a list of your VMs with tick boxes. Running ones are already ticked. Then it asks which are **critical** (router, firewall, domain controllers, NAS) and pre-ticks its guesses from their names. Critical ones always need your approval and are never rebooted casually.
-3. **Chat app.**
+1. **What to watch.**
+   - **This server itself:** for a plain Ubuntu/Debian box. It lists the services running on it with common apps (nginx, docker, databases…) pre-ticked, and watches CPU, RAM, disks and load. Services that could lock you out if restarted (like SSH) are alert-only.
+   - **Proxmox / ESXi:** it connects and shows your VMs with tick boxes, running ones pre-ticked. Then it asks which are **critical** (router, firewall, domain controllers, NAS) and pre-ticks its guesses from their names. Critical ones always need your approval and are never rebooted casually.
+   - **Just the network:** pings, websites and ports only.
+2. **Chat app.**
    - **Telegram:** make a bot with **@BotFather**, paste the token, then send `/start` to your bot. The wizard grabs your chat ID and locks the bot to you.
    - **Discord:** create a bot at discord.com/developers, paste the token, and open the invite link it prints. Then turn on Developer Mode in Discord and right-click to copy your server, channel and user IDs. It sends a test message.
-4. **AI.** Local Ollama or Claude (it tests your key).
-5. **Checks.** It adds your gateway, DNS servers and internet pings automatically. You can add websites and `host:port` services.
-6. **Switch** (optional): IP, read-only community string, and which ports to watch.
-7. **Heartbeat** (optional): a free [healthchecks.io](https://healthchecks.io) link that warns you if the overseer itself goes offline.
+3. **AI.** Local Ollama or Claude (it tests your key).
+4. **Checks.** It adds your gateway, DNS servers and internet pings automatically. You can add websites and `host:port` services.
+5. **Switch** (optional): IP, read-only community string, and which ports to watch.
+6. **Heartbeat** (optional): a free [healthchecks.io](https://healthchecks.io) link that warns you if the overseer itself goes offline.
 
-Nothing is saved until you confirm on the final review screen, where **No** takes you back to change things. To run it again later, use the `overseer` menu → *Re-run setup*. Your old config is kept as a backup.
+The AI gets a description of your lab built automatically from your answers. Nothing is saved until you confirm on the final review screen, where **No** takes you back to change things. To run it again later, use the `overseer` menu → *Re-run setup*. Your old config is kept as a backup.
 
 ---
 
@@ -184,6 +186,16 @@ checks:
   - {name: ldap,    type: tcp,  host: 192.168.1.30, port: 389, target: dc01}
 ```
 `target` tells it which machine to blame when that check fails. Add `disabled: true` to pause a check. Full disks (over 85%), low host memory and stopped VMs are detected automatically.
+
+**This server (no VMs):**
+```yaml
+local:
+  services: [nginx, docker, postgresql]   # systemd units to watch
+  disks: ["/", "/srv"]                   # warn above 85% full
+targets:
+  nginx: {kind: service, local: true, actions: ["restart_service:nginx"]}
+```
+After editing local services by hand, run `overseer` → *Restart*. That also refreshes the rule that lets it restart exactly those services.
 
 **Switch:** see the `switch:` section of the example config. Port names must match what the switch reports, like `Gi1/0/1` or `Po1`.
 

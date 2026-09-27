@@ -18,7 +18,7 @@ say(){ echo -e "\n\033[1;36m== $*\033[0m"; }
 
 say "System packages"
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv iputils-ping iproute2 snmp openssh-client curl ca-certificates zstd whiptail nano >/dev/null
+apt-get install -y -qq python3 python3-venv iputils-ping iproute2 snmp openssh-client curl ca-certificates zstd whiptail nano sudo >/dev/null
 setcap cap_net_raw+ep "$(readlink -f "$(command -v ping)")" 2>/dev/null || true   # unprivileged containers
 
 say "App → /opt/overseer"
@@ -42,6 +42,7 @@ if [ "$WIZARD" = 1 ]; then
   if [ -f /etc/overseer/config.yaml ]; then echo "Existing config found — keeping it (change it later with: overseer)"; else /opt/overseer/venv/bin/python /opt/overseer/setup.py --out-dir /etc/overseer; fi
 fi
 [ -f /etc/overseer/config.yaml ] || { echo "No /etc/overseer/config.yaml — run: python3 /opt/overseer/setup.py"; exit 1; }
+/opt/overseer/venv/bin/python /opt/overseer/tools/sync-sudoers.py || true
 [ -f /etc/overseer/messages.yaml ] || cp /opt/overseer/messages.example.yaml /etc/overseer/messages.yaml
 chown overseer /etc/overseer/config.yaml /etc/overseer/secrets.env /etc/overseer/messages.yaml 2>/dev/null || true
 chmod 600 /etc/overseer/secrets.env 2>/dev/null || true

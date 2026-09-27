@@ -151,6 +151,62 @@ def setup_esxi(sec):
     return cfg, []
 
 
+NO_RESTART = {"ssh", "sshd", "networking", "systemd-networkd", "NetworkManager", "ufw", "fail2ban"}   # restarting these can lock you out
+
+
+def real_disks():
+    keep, seen = [], set()
+    try:
+        for line in open("/proc/mounts"):
+            dev, mnt, fs = line.split()[:3]
+            if fs in ("ext4", "ext3", "xfs", "btrfs", "zfs", "f2fs") and not mnt.startswith(("/boot", "/snap", "/var/lib/docker")) and dev not in seen:
+                seen.add(dev)
+                keep.append(mnt)
+    except OSError:
+        pass
+    return sorted(keep) or ["/"]
+
+
+def setup_local():
+    from overseer.localhost import running_services, COMMON
+    svcs = running_services()
+    targets = {"this-server": {"kind": "host", "floor_tier": 3, "actions": [], "notes": "the machine the overseer runs on"},
+               "internet": {"kind": "external", "actions": []}}
+    chosen = []
+    if svcs:
+        chosen = UI.checklist("Which services on this server should it watch?\n(Common apps are pre-ticked. Space = toggle, Enter = done)",
+                              [(n, n, n in COMMON) for n in svcs])
+    for n in chosen:
+        if n in NO_RESTART:
+            targets[n] = {"kind": "service", "actions": [], "notes": "alert only — restarting it could lock you out"}
+        else:
+            targets[n] = {"kind": "service", "local": True, "actions": [f"restart_service:{n}"]}
+            if n in ("docker", "containerd", "podman", "mysql", "mariadb", "postgresql"):
+                targets[n]["floor_tier"] = 3          # restarting these takes other things down with them
+    local = {"services": chosen, "disks": real_disks()}
+    return local, targets
+
+
+def auto_description(st):
+    """What the AI is told about the lab — built from the answers instead of asking."""
+    hv = st.get("hv_type")
+    t = st.get("targets") or {}
+    crit = [k for k, v in t.items() if v.get("floor_tier", 0) >= 3 and k not in ("host", "this-server")]
+    if hv == "this":
+        svcs = (st.get("local") or {}).get("services") or []
+        d = f"a single Linux server ({os.uname().nodename})" + (f" running {', '.join(svcs[:8])}" if svcs else "")
+    elif hv in ("proxmox", "esxi"):
+        n = len([v for v in t.values() if v.get("vmid") is not None or v.get("vmname")])
+        d = f"a {'Proxmox' if hv == 'proxmox' else 'VMware ESXi'} homelab with {n} watched VMs/containers"
+    else:
+        d = "a home network"
+    if crit:
+        d += f"; critical: {', '.join(crit[:6])}"
+    if st.get("switch"):
+        d += "; managed switch monitored over SNMP"
+    return d
+
+
 def build_targets(hv_type, guests):
     targets = {"host": {"kind": "host", "floor_tier": 3, "actions": [], "notes": "the hypervisor itself"},
                "internet": {"kind": "external", "actions": []}}
@@ -354,19 +410,24 @@ def main():
     def s_welcome():
         UI.msg("Welcome! This takes about 3 minutes.\n\nArrow keys move, Space ticks boxes, Enter confirms.\n"
                "Back goes to the previous step. Esc pauses.\nNothing is saved until the very end.", "Lab Overseer setup")
-        st["lab"] = UI.ask("Describe your lab in one line (helps the AI understand it)",
-                           st.get("lab") or ("a homelab" if not a.hypervisor else f"a {a.hypervisor.capitalize()} homelab"))
 
     def s_hypervisor():
-        hv_type = a.hypervisor or UI.menu("What runs your VMs?", [("proxmox", "Proxmox VE"), ("esxi", "VMware ESXi / vCenter"),
-                                                                   ("none", "Nothing / not sure — just watch the network")],
-                                          st.get("hv_type", "proxmox"))
-        hv, guests = ({"type": "none"}, [])
+        hv_type = a.hypervisor or UI.menu("What should it watch?", [
+            ("this", "This server itself — no VMs (Ubuntu/Debian server)"),
+            ("proxmox", "Proxmox VE — VMs & containers"),
+            ("esxi", "VMware ESXi / vCenter — VMs"),
+            ("none", "Just the network (pings, websites, services)")],
+            st.get("hv_type", "proxmox" if os.path.exists("/etc/pve") else "this"))
+        hv, guests, local = {"type": "none"}, [], None
         if hv_type == "proxmox":
             hv, guests = setup_proxmox(sec)
         elif hv_type == "esxi":
             hv, guests = setup_esxi(sec)
-        st.update(hv_type=hv_type, hv=hv, targets=build_targets(hv_type, guests))
+        if hv_type == "this":
+            local, targets = setup_local()
+        else:
+            targets = build_targets(hv_type, guests)
+        st.update(hv_type=hv_type, hv=hv, local=local, targets=targets)
 
     def s_notifier():
         kind = UI.menu("Where should alerts go?", [("telegram", "Telegram (easiest)"), ("discord", "Discord")], st.get("kind", "telegram"))
@@ -390,7 +451,10 @@ def main():
     def s_review():
         n_watch = len([t for t in st["targets"].values() if t.get("vmid") is not None or t.get("vmname")])
         ai = {"ollama": "local Ollama", "claude": "Claude API"}[st["llm"]["backend"]]
-        if not UI.yes(f"Ready to save:\n\n  • Lab: {st['lab']}\n  • Hypervisor: {st['hv_type']} — watching {n_watch} VMs/containers\n"
+        watching = {"this": f"this server + {len((st['local'] or {}).get('services') or [])} services",
+                    "proxmox": f"Proxmox — {n_watch} VMs/containers", "esxi": f"ESXi — {n_watch} VMs",
+                    "none": "the network only"}[st["hv_type"]]
+        if not UI.yes(f"Ready to save:\n\n  • Watching: {watching}\n"
                       f"  • Alerts: {st['kind'].capitalize()}\n  • AI: {ai}\n  • Network checks: {len(st['checks'])}\n"
                       f"  • Switch: {'yes' if st['switch'] else 'no'}   • Heartbeat: {'yes' if st['hb'] else 'no'}\n\n"
                       "Save this? (No = go back and change something)"):
@@ -409,10 +473,12 @@ def main():
             else:
                 i -= 1
 
-    cfg = {"lab_description": st["lab"], "dry_run": True, "interval_seconds": 60, "review_interval_minutes": 60,
+    cfg = {"lab_description": auto_description(st), "dry_run": True, "interval_seconds": 60, "review_interval_minutes": 60,
            "max_actions_per_hour": 2, "db_path": "/var/lib/overseer/overseer.db", "decision_log": "/var/lib/overseer/decisions.jsonl",
            "heartbeat_url": st["hb"], "llm": st["llm"], "notifier": st["notifier"], "hypervisor": st["hv"], "switch": st["switch"],
            "targets": st["targets"], "checks": st["checks"]}
+    if st.get("local"):
+        cfg["local"] = st["local"]
     write_files(a.out_dir, cfg, sec)
     llm = st["llm"]
     json.dump({"llm": llm["backend"], "local_ollama": llm["backend"] == "ollama" and "127.0.0.1" in llm["ollama"]["url"],

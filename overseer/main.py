@@ -4,6 +4,7 @@ import yaml, urllib3
 
 from . import brain, policy, actions
 from .collectors import Switch, snapshot
+from .localhost import LocalHost
 from .hypervisors import make_hypervisor
 from .notifiers import make_notifier
 from .messages import Messages
@@ -42,6 +43,7 @@ class Engine:
         self.state = State(cfg["db_path"])
         self.pve = make_hypervisor(cfg)
         self.switch = Switch(cfg["switch"]) if (cfg.get("switch") or {}).get("host") else None
+        self.local = LocalHost(cfg["local"]) if cfg.get("local") else None
         self.M = Messages(cfg.get("messages_path", "/etc/overseer/messages.yaml"))
         brain.set_lab(cfg.get("lab_description"), self.M.ai_style)
         self.backend = brain.make_backend(cfg["llm"])
@@ -183,7 +185,7 @@ class Engine:
         self.wa.send(msg, incident_id=iid, mode=d.mode)
 
     def tick(self):
-        snap = snapshot(self.cfg, self.pve, self.switch)
+        snap = snapshot(self.cfg, self.pve, self.switch, self.local)
         self.last_snap = snap
         n = snap.get("facts", {}).get("node", {})
         g = snap.get("facts", {}).get("guests", {})
@@ -244,7 +246,7 @@ def main():
     eng = Engine(cfg)
     if a.once:
         import json
-        print(json.dumps(snapshot(eng.cfg, eng.pve, eng.switch), indent=2, default=str))
+        print(json.dumps(snapshot(eng.cfg, eng.pve, eng.switch, eng.local), indent=2, default=str))
         return
     eng.wa.start(eng.on_command)
     eng.loop()

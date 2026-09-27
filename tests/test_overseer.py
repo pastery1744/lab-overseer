@@ -274,8 +274,7 @@ def test_wizard_end_to_end_plain(tmp_path, monkeypatch):
     monkeypatch.setattr(S, "dns_servers", lambda: ["10.0.0.53"])
     answers = iter([
         "",            # welcome [Enter]
-        "my test lab", # description
-        "1",           # hypervisor: proxmox
+        "2",           # what to watch: proxmox
         "https://10.0.0.10:8006", "overseer@pve!t",   # url, token id  (secret via getpass)
         "",            # proxmox token msg [Enter] (msg comes first — consumed above order-insensitively)
         "",            # watch checklist: keep defaults
@@ -299,6 +298,7 @@ def test_wizard_end_to_end_plain(tmp_path, monkeypatch):
     sec = open(tmp_path / "secrets.env").read()
     assert cfg["notifier"] == {"type": "telegram", "token_env": "TG_TOKEN", "chat_id": "777"}
     assert cfg["hypervisor"]["node"] == "pve" and cfg["targets"]["pfsense"]["floor_tier"] == 3
+    assert cfg["lab_description"].startswith("a Proxmox homelab with 3 watched") and "pfsense" in cfg["lab_description"]
     assert "tmpl" not in cfg["targets"]           # templates are never targets
     assert "reboot_ct" in cfg["targets"]["radio"]["actions"] and cfg["checks"][0]["host"] == "10.0.0.1"
     assert "PVE_TOKEN=pve-secret" in sec and "TG_TOKEN=123:TOKEN" in sec
@@ -404,8 +404,8 @@ def test_wizard_back_button(tmp_path, monkeypatch):
                         else (200, {"ok": True, "result": []}))
     monkeypatch.setattr(S, "default_gateway", lambda: None)
     monkeypatch.setattr(S, "dns_servers", lambda: [])
-    answers = iter(["", "first lab", "back",          # welcome, lab, BACK at hypervisor menu
-                    "", "second lab", "3",            # welcome again, new lab, hypervisor: none
+    answers = iter(["", "back",                       # welcome, BACK at the what-to-watch menu
+                    "", "4",                          # welcome again, then: just the network
                     "1", "", "", "",                  # telegram + its three info screens
                     "back",                           # BACK at the AI menu -> notifier step again
                     "1", "", "", "",                  # telegram again
@@ -415,4 +415,56 @@ def test_wizard_back_button(tmp_path, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["setup.py", "--out-dir", str(tmp_path)])
     S.main()
     cfg = yaml.safe_load(open(tmp_path / "config.yaml"))
-    assert cfg["lab_description"] == "second lab" and cfg["hypervisor"]["type"] == "none" and cfg["notifier"]["chat_id"] == "5"
+    assert cfg["lab_description"] == "a home network" and cfg["hypervisor"]["type"] == "none" and cfg["notifier"]["chat_id"] == "5"
+
+
+
+def test_this_server_mode(tmp_path, monkeypatch):
+    """Plain Ubuntu server, no VMs: wizard discovers services; collector watches host + services; restarts run locally."""
+    import sys, builtins, getpass, importlib, subprocess as sp
+    sys.path.insert(0, str(pathlib.Path(__file__).parent.parent))
+    monkeypatch.setenv("OVERSEER_PLAIN", "1")
+    for k in ("PVE_URL", "PVE_TOKEN_ID", "PVE_TOKEN", "PVE_NODE", "OVERSEER_LLM"):
+        monkeypatch.delenv(k, raising=False)
+    import setup as S
+    from overseer import localhost as LH
+    importlib.reload(S)
+    monkeypatch.setattr(LH, "running_services", lambda: ["cron-ish", "docker", "nginx", "ssh"])
+    monkeypatch.setattr(S, "real_disks", lambda: ["/", "/srv"])
+    monkeypatch.setattr(S, "http", lambda m, url, *a, **k: (200, {"ok": True, "result": {"username": "b"}}) if "getMe" in url else
+                        (200, {"ok": True, "result": [{"update_id": 1, "message": {"chat": {"id": 9, "type": "private"}, "from": {}}}]}) if "timeout=10" in url
+                        else (200, {"ok": True, "result": []}))
+    monkeypatch.setattr(S, "default_gateway", lambda: "10.0.0.1")
+    monkeypatch.setattr(S, "dns_servers", lambda: [])
+    answers = iter(["", "1",        # welcome; watch: this server
+                    "",             # services checklist: keep pre-ticked (docker, nginx, ssh)
+                    "1", "", "", "", "1", "n", "n", "n", "", ""] + [""] * 5)
+    monkeypatch.setattr(builtins, "input", lambda p="": next(answers))
+    monkeypatch.setattr(getpass, "getpass", lambda p="": "1:TOK")
+    monkeypatch.setattr(sys, "argv", ["setup.py", "--out-dir", str(tmp_path)])
+    S.main()
+    cfg = yaml.safe_load(open(tmp_path / "config.yaml"))
+    t = cfg["targets"]
+    assert cfg["local"] == {"services": ["docker", "nginx", "ssh"], "disks": ["/", "/srv"]} and "cron-ish" not in t
+    assert t["nginx"] == {"kind": "service", "local": True, "actions": ["restart_service:nginx"]}
+    assert t["docker"]["floor_tier"] == 3 and t["ssh"]["actions"] == []          # ssh: alert only
+    assert cfg["hypervisor"]["type"] == "none" and "running docker, nginx, ssh" in cfg["lab_description"]
+
+    # collector
+    monkeypatch.setattr(LH, "_cpu_pct", lambda interval=0.5: 12.5)
+    monkeypatch.setattr(LH, "_mem_pct", lambda: 95.0)
+    monkeypatch.setattr(LH, "_active", lambda u: "active" if u != "nginx" else "failed")
+    checks, facts = LH.LocalHost(cfg["local"]).collect()
+    by = {c["name"]: c for c in checks}
+    assert facts["node"]["cpu_pct"] == 12.5 and not by["local-mem"]["ok"] and by["storage-root"]["ok"] is not None
+    assert not by["svc-nginx"]["ok"] and by["svc-nginx"]["target"] == "nginx" and by["svc-docker"]["ok"]
+
+    # local restart goes through sudo, never ssh
+    from overseer import actions
+    calls = []
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        return sp.CompletedProcess(cmd, 0, "active\n", "")
+    monkeypatch.setattr(actions.subprocess, "run", fake_run)
+    ok, _ = actions.execute("restart_service", "nginx", "nginx", t["nginx"], None, dry_run=False)
+    assert ok and calls[0] == ["sudo", "-n", "/usr/bin/systemctl", "restart", "nginx"]

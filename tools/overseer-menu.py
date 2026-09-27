@@ -147,11 +147,12 @@ def main():
         elif choice == "logs":
             UI.text("Recent logs", sh("journalctl -u overseer -n 150 --no-pager -o short-iso | sed -E 's/bot[0-9]+:[A-Za-z0-9_-]+/bot<TOKEN>/g'").stdout)
         elif choice == "restart":
-            sh("systemctl restart overseer")
+            sh(f"{APP}/venv/bin/python {APP}/tools/sync-sudoers.py; systemctl restart overseer")
             UI.msg(f"Restarted — service is {sh('systemctl is-active overseer').stdout.strip()}.", "Restart")
         elif choice == "setup":
             if UI.yes("Re-run the full setup? Your current config is backed up first."):
-                os.system(f"{APP}/venv/bin/python {APP}/setup.py && chown overseer /etc/overseer/config.yaml /etc/overseer/secrets.env && systemctl restart overseer")
+                os.system(f"{APP}/venv/bin/python {APP}/setup.py && chown overseer /etc/overseer/config.yaml /etc/overseer/secrets.env "
+                          f"&& {APP}/venv/bin/python {APP}/tools/sync-sudoers.py && systemctl restart overseer")
         elif choice == "wording":
             mp = "/etc/overseer/messages.yaml"
             if not os.path.exists(mp):
@@ -169,7 +170,7 @@ def main():
         elif choice == "edit":
             os.system(f"${{EDITOR:-nano}} {CFG}")
             if UI.yes("Restart the overseer to apply your changes?"):
-                sh("systemctl restart overseer")
+                sh(f"{APP}/venv/bin/python {APP}/tools/sync-sudoers.py; systemctl restart overseer")
 
 
 if __name__ == "__main__":

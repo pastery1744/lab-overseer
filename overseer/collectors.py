@@ -112,13 +112,17 @@ class Switch:
         return checks
 
 
-def snapshot(cfg, hv, switch):
+def snapshot(cfg, hv, switch, local=None):
     t0 = time.time()
     checks = run_checks(cfg.get("checks", []))
     facts = {}
     if hv:
         c, facts = hv.collect(cfg.get("targets", {}))
         checks += c
+    if local:
+        c, lf = local.collect()
+        checks += c
+        facts.setdefault("node", lf.get("node"))
     if switch:
         checks += switch.collect()
     return {"ts": int(t0), "took_s": round(time.time() - t0, 1), "checks": checks, "facts": facts}

@@ -17,6 +17,10 @@ def execute(action, arg, target_name, target, hv, dry_run):
         if action == "restart_service":
             if not SERVICE_RE.match(arg):
                 return False, "bad service name"
+            if target.get("local"):          # a service on this very machine (sudoers allows only listed units)
+                r = subprocess.run(["sudo", "-n", "/usr/bin/systemctl", "restart", arg], capture_output=True, text=True, timeout=60)
+                ok = r.returncode == 0 and subprocess.run(["systemctl", "is-active", arg], capture_output=True, text=True).stdout.strip() == "active"
+                return ok, (r.stdout + r.stderr).strip()[-200:] or ("restarted, active" if ok else "restarted but not active")
             ssh = target["ssh"]
             cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-i", ssh.get("key", "/etc/overseer/id_ed25519"),
                    f"{ssh['user']}@{ssh['host']}", f"sudo systemctl restart {shlex.quote(arg)} && systemctl is-active {shlex.quote(arg)}"]
