@@ -59,6 +59,7 @@ class Engine:
         self.briefing = threading.Lock()
         self.llm = threading.Lock()   # one LLM job at a time — CPU inference can't share cores
         self.last_review = time.time()  # first full review after an interval, not at boot
+        self.last_llm_run = None         # when the /status analyst (brief_model) last replied (None = not since start)
         self.confirmed = set()           # latest confirmed-failing checks (read by background triage)
         self.background = False          # loop() turns this on; tests call tick() synchronously
         self.last_prune = 0
@@ -131,7 +132,10 @@ class Engine:
         L.append(M("status_incidents", open=len(opens), day=len(day)) if (opens or day) else M("status_no_incidents"))
         for i in opens:
             L.append(M("status_incident", icon=M.icon(i["tier"]), id=i["id"], target=i["target"], summary=i["summary"], status=i["status"]))
-        L.append(M("status_llm", minutes=int((time.time() - self.last_review) / 60)))
+        if self.last_llm_run is None:
+            L.append(M("status_llm_none"))
+        else:
+            L.append(M("status_llm", minutes=int((time.time() - self.last_llm_run) / 60)))
         return "\n".join(L)
 
     def _start_brief(self):
@@ -149,6 +153,8 @@ class Engine:
                     text, secs = brain.brief(self.backend, self.last_snap, hist, self.state.recent())
                 finally:
                     self.llm.release()
+                if text:
+                    self.last_llm_run = time.time()
                 self.wa.send(self.M("analyst_reply", secs=secs, text=text) if text else self.M("analyst_failed", secs=secs))
             finally:
                 self.briefing.release()

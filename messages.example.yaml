@@ -75,7 +75,8 @@
 #   placeholders: {icon} {id} {target} {summary} {status}
 # status_incident: "  {icon} {id} {target}: {summary} [{status}]"
 #   placeholders: {minutes}
-# status_llm: "🧠 Last LLM review {minutes} min ago"
+# status_llm: "🧠 Last analyst run {minutes} min ago"
+# status_llm_none: "🧠 No analyst run yet (send /status to ask)"
 
 # ---- Analyst (/status follow-up) ----
 # analyst_thinking: "🧠 Analyst thinking…"

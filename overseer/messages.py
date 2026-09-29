@@ -48,7 +48,8 @@ DEFAULTS = {
     "status_incidents": "🧾 {open} open · {day} in last 24h",
     "status_no_incidents": "🧾 No incidents in last 24h",
     "status_incident": "  {icon} {id} {target}: {summary} [{status}]",
-    "status_llm": "🧠 Last LLM review {minutes} min ago",
+    "status_llm": "🧠 Last analyst run {minutes} min ago",
+    "status_llm_none": "🧠 No analyst run yet (send /status to ask)",
 
     # ---- analyst ----
     "analyst_thinking": "🧠 Analyst thinking…",
